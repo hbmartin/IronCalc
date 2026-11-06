@@ -18,7 +18,10 @@ use crate::{
     language::{get_default_language, get_language},
     locale::{get_default_locale, get_locale},
     model::{get_milliseconds_since_epoch, Model, ParsedDefinedName},
-    types::{DefinedName, Metadata, SheetState, Workbook, WorkbookSettings, Worksheet},
+    types::{
+        DefinedName, IterativeCalculation, Metadata, SheetState, Workbook, WorkbookSettings,
+        Worksheet,
+    },
     utils::ParsedReference,
 };
 
@@ -71,6 +74,7 @@ impl<'a> Model<'a> {
     // This function parses all the internal formulas in all the worksheets
     // (in the default language ("en") and locale ("en") and the RC format)
     pub(crate) fn parse_formulas(&mut self) {
+        self.invalidate_calculation();
         let locale = self.locale;
         let language = self.language;
 
@@ -634,6 +638,7 @@ impl<'a> Model<'a> {
             settings: WorkbookSettings {
                 tz: timezone.to_string(),
                 locale: locale_id.to_string(),
+                iterative_calculation: IterativeCalculation::default(),
             },
             metadata: Metadata {
                 application: APPLICATION.to_string(),
@@ -666,6 +671,7 @@ impl<'a> Model<'a> {
             lambdas: HashMap::new(),
             last_lambda_id: 0,
             evaluation: crate::evaluation::Evaluation::default(),
+            dependency_index: None,
             cf_cache: HashMap::new(),
             links: HashMap::new(),
         };

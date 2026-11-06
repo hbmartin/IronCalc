@@ -47,7 +47,10 @@ use crate::constants::{LAST_COLUMN, LAST_ROW};
 use crate::expressions::token::Error;
 use crate::expressions::types::CellReferenceIndex;
 use crate::model::Model;
-use crate::types::{ArrayKind, Cell, Worksheet};
+use crate::types::{
+    ArrayKind, CalculationFailure, CalculationReport, Cell, FormulaValue, IterativeCalculation,
+    Worksheet,
+};
 
 /// The hasher of the maps the evaluation keeps about positions. Their keys are
 /// three small integers and every formula looks several of them up, which
@@ -80,6 +83,33 @@ pub(crate) type KeyBuild = std::hash::BuildHasherDefault<KeyHasher>;
 
 /// `(sheet, row, column)`: a position in the workbook.
 pub(crate) type CellKey = (u32, i32, i32);
+
+/// A dynamic anchor is scalar only when it neither occupies nor is blocked
+/// from occupying other cells. A blocked spill also has an area of 1x1.
+pub(crate) fn scalar_calculation_cell(cell: &Cell) -> bool {
+    match cell {
+        Cell::ArrayFormula {
+            kind: ArrayKind::Dynamic,
+            r: (1, 1),
+            v,
+            ..
+        } => !matches!(
+            v,
+            FormulaValue::Error {
+                ei: Error::SPILL,
+                ..
+            }
+        ),
+        Cell::ArrayFormula { .. } | Cell::SpillCell { .. } => false,
+        _ => true,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IterativeValue {
+    Number(f64),
+    Boolean(bool),
+}
 
 fn key(cell: CellReferenceIndex) -> CellKey {
     (cell.sheet, cell.row, cell.column)
@@ -421,6 +451,30 @@ pub(crate) struct Evaluation {
     /// restart, the cells stay on `stack`, still `Evaluating`, to be run again
     /// from the top once the recursion has unwound.
     pub(crate) unwinding: bool,
+    /// True while an iterative calculation runs. A read that closes a loop then
+    /// gets the value its cell held after the previous recalculation instead of
+    /// `#CIRC!`.
+    pub(crate) iterating: bool,
+    /// Set when a read closed a loop during the current iterative calculation.
+    /// Without one there is nothing to recalculate.
+    pub(crate) loop_met: bool,
+    pub(crate) iterative_cells: HashSet<CellKey>,
+    pub(crate) report: CalculationReport,
+    pub(crate) lambda_depth: usize,
+    pub(crate) max_lambda_depth: usize,
+    pub(crate) recursion_limit_hit: bool,
+    pub(crate) recursion_failures: HashSet<CellKey>,
+    /// Eligibility of the last complete evaluation, checked before indexing.
+    pub(crate) scalar_only: Option<bool>,
+    pub(crate) spill_changed: bool,
+    pub(crate) runtime_reads: HashMap<CellKey, HashSet<CellKey>>,
+    pub(crate) time_or_random: HashSet<CellKey>,
+    #[cfg(test)]
+    pub(crate) full_evaluations: usize,
+    #[cfg(test)]
+    pub(crate) dependency_index_builds: usize,
+    #[cfg(test)]
+    pub(crate) cycle_snapshot_cells: usize,
 }
 
 /// How deep the recursion may go when nobody has said otherwise, in formulas
@@ -471,6 +525,24 @@ impl Default for Evaluation {
             max_stack: DEFAULT_MAX_STACK,
             stack_base: 0,
             unwinding: false,
+            iterating: false,
+            loop_met: false,
+            iterative_cells: HashSet::new(),
+            report: CalculationReport::default(),
+            lambda_depth: 0,
+            max_lambda_depth: 256,
+            recursion_limit_hit: false,
+            recursion_failures: HashSet::new(),
+            scalar_only: None,
+            spill_changed: false,
+            runtime_reads: HashMap::new(),
+            time_or_random: HashSet::new(),
+            #[cfg(test)]
+            full_evaluations: 0,
+            #[cfg(test)]
+            dependency_index_builds: 0,
+            #[cfg(test)]
+            cycle_snapshot_cells: 0,
         }
     }
 }
@@ -496,14 +568,200 @@ impl Evaluation {
 }
 
 impl<'a> Model<'a> {
+    /// Invalidate caches before a structural mutation, including mutations
+    /// that could fail partway through. Resource limits remain unchanged.
+    pub(crate) fn invalidate_calculation(&mut self) {
+        self.dependency_index = None;
+        self.evaluation.cells.clear();
+        self.evaluation.circular.clear();
+        self.evaluation.scalar_only = None;
+        self.evaluation.report = CalculationReport::default();
+        self.links.clear();
+        self.cf_cache.clear();
+    }
+
     /// Evaluates every formula in the workbook.
     ///
+    /// A circular reference evaluates to `#CIRC!`, unless iterative calculation is
+    /// enabled in the workbook settings, see [`Model::set_iterative_calculation`].
+    pub fn evaluate(&mut self) {
+        self.evaluate_headless();
+        self.evaluate_conditional_formatting();
+    }
+
+    /// Calculates without rebuilding conditional-formatting/UI caches.
+    pub fn evaluate_headless(&mut self) {
+        #[cfg(test)]
+        {
+            self.evaluation.full_evaluations += 1;
+        }
+        self.dependency_index = None;
+        self.evaluation.scalar_only = None;
+        let settings = self.workbook.settings.iterative_calculation.clone();
+        self.evaluation.report = CalculationReport::default();
+        self.evaluation.recursion_limit_hit = false;
+        self.evaluation.lambda_depth = 0;
+        if settings.enabled && settings.validate().is_err() {
+            self.evaluation.report.converged = false;
+            self.evaluation.report.failure = Some(CalculationFailure::InvalidSettings);
+            return;
+        }
+        if settings.enabled {
+            self.evaluate_iteratively(&settings);
+        } else {
+            self.evaluate_once();
+            let cyclic = !self.evaluation.circular.is_empty();
+            self.evaluation.report = CalculationReport {
+                converged: !cyclic,
+                iterations: 1,
+                residual: 0.0,
+                had_circular_references: cyclic,
+                failure: cyclic.then_some(CalculationFailure::CircularReference),
+            };
+        }
+        if self.evaluation.recursion_limit_hit {
+            self.evaluation.report.converged = false;
+            self.evaluation.report.failure = Some(CalculationFailure::RecursionLimit);
+        }
+        self.evaluation.scalar_only = Some(self.workbook.worksheets.iter().all(|sheet| {
+            sheet
+                .sheet_data
+                .cells()
+                .all(|(_, _, cell)| scalar_calculation_cell(&cell))
+        }));
+    }
+
+    /// Explicit convergence status; reaching the cap is never convergence.
+    pub fn evaluation_report(&self) -> &CalculationReport {
+        &self.evaluation.report
+    }
+
+    /// Evaluates the workbook again and again until the cells settle.
+    ///
+    /// Every pass is a complete evaluation. A formula that reads a cell that is
+    /// still being evaluated gets the value that cell held when the previous
+    /// pass ended, zero if it had none. Cycle participants must settle within
+    /// `maximum_change` (exact numeric equality when zero); Boolean values and
+    /// types must match exactly. The calculation report distinguishes convergence
+    /// from exhausting `maximum_iterations`. A workbook without loops needs one pass.
+    fn evaluate_iteratively(&mut self, settings: &IterativeCalculation) {
+        self.forget_formula_values();
+        self.evaluation.iterating = true;
+        self.evaluation.iterative_cells.clear();
+        let mut previous = HashMap::new();
+        let mut restarts = 0;
+        #[cfg(test)]
+        {
+            self.evaluation.cycle_snapshot_cells = 0;
+        }
+        self.evaluation.report.converged = false;
+        self.evaluation.report.failure = Some(CalculationFailure::IterationLimit);
+        for iteration in 1..=settings.maximum_iterations {
+            self.evaluation.loop_met = false;
+            self.evaluate_once();
+            restarts += self.evaluation.restarts_in_last_evaluation;
+            self.evaluation.report.iterations = iteration;
+            self.evaluation.report.had_circular_references |= self.evaluation.loop_met;
+            if !self.evaluation.circular.is_empty() {
+                self.evaluation.report.had_circular_references = true;
+                self.evaluation.report.failure = Some(CalculationFailure::CyclicArray);
+                break;
+            }
+            if !self.evaluation.loop_met {
+                self.evaluation.report.converged = true;
+                self.evaluation.report.failure = None;
+                break;
+            }
+            if self.cycle_reads_time_or_random() {
+                self.evaluation.report.failure = Some(CalculationFailure::VolatileCycle);
+                break;
+            }
+            let mut change = 0.0_f64;
+            let mut failure = None;
+            let mut exact_stable = true;
+            let mut current = HashMap::with_capacity(self.evaluation.iterative_cells.len());
+            for &(sheet, row, column) in &self.evaluation.iterative_cells {
+                let cell = CellReferenceIndex { sheet, row, column };
+                let position = (sheet, row, column);
+                let before = previous
+                    .get(&position)
+                    .copied()
+                    .or_else(|| (iteration == 1).then_some(IterativeValue::Number(0.0)));
+                match self.fetch_cell(cell).as_deref() {
+                    Some(cell) if !scalar_calculation_cell(cell) => {
+                        failure = Some(CalculationFailure::CyclicArray);
+                        break;
+                    }
+                    Some(
+                        Cell::CellFormula {
+                            v: FormulaValue::Number(value),
+                            ..
+                        }
+                        | Cell::ArrayFormula {
+                            v: FormulaValue::Number(value),
+                            ..
+                        },
+                    ) => {
+                        if !value.is_finite() {
+                            failure = Some(CalculationFailure::NonFiniteValue);
+                            break;
+                        }
+                        current.insert(position, IterativeValue::Number(*value));
+                        if let Some(IterativeValue::Number(before)) = before {
+                            change = change.max((value - before).abs());
+                        } else {
+                            exact_stable = false;
+                            change = change.max(1.0);
+                        }
+                    }
+                    Some(
+                        Cell::CellFormula {
+                            v: FormulaValue::Boolean(value),
+                            ..
+                        }
+                        | Cell::ArrayFormula {
+                            v: FormulaValue::Boolean(value),
+                            ..
+                        },
+                    ) => {
+                        current.insert(position, IterativeValue::Boolean(*value));
+                        if !matches!(before, Some(IterativeValue::Boolean(b)) if b == *value) {
+                            exact_stable = false;
+                            change = change.max(1.0);
+                        }
+                    }
+                    _ => {
+                        failure = Some(CalculationFailure::NonNumericCycle);
+                        break;
+                    }
+                }
+            }
+            #[cfg(test)]
+            {
+                self.evaluation.cycle_snapshot_cells += current.len();
+            }
+            self.evaluation.report.residual = change;
+            if failure.is_some() {
+                self.evaluation.report.failure = failure;
+                break;
+            }
+            previous = current;
+            if exact_stable && (change == 0.0 || change < settings.maximum_change) {
+                self.evaluation.report.converged = true;
+                self.evaluation.report.failure = None;
+                break;
+            }
+        }
+        self.evaluation.restarts_in_last_evaluation = restarts;
+        self.evaluation.iterating = false;
+    }
+
     /// Runs passes until one completes without a restart. `RestartLog` learns
     /// from each restart, reorders the anchors and marks what it proves
     /// circular; see there for why the loop ends. A marked anchor stores
     /// `#CIRC!` and keeps no spill cells: its stale cells are dropped when it
     /// is marked, so there is nothing of it to read or to contradict.
-    pub fn evaluate(&mut self) {
+    fn evaluate_once(&mut self) {
         self.sync_anchor_order();
         // Every pass starts from the same sheet: what an abandoned pass wrote
         // is undone. This is what makes a pass a function of the anchor order.
@@ -530,7 +788,97 @@ impl<'a> Model<'a> {
             self.restore_dynamic_spills(&spills_before);
         }
         self.evaluation.restarts_in_last_evaluation = log.restarts;
-        self.evaluate_conditional_formatting();
+    }
+
+    /// What a cell in a loop contributes to the cell that closes the loop: the
+    /// number or boolean it held after the previous pass, zero for anything else.
+    fn previous_value(&self, cell_reference: CellReferenceIndex) -> CalcResult {
+        match self.fetch_cell(cell_reference).as_deref() {
+            Some(Cell::CellFormula { v, .. } | Cell::ArrayFormula { v, .. }) => match v {
+                FormulaValue::Number(n) => CalcResult::Number(*n),
+                FormulaValue::Boolean(b) => CalcResult::Boolean(*b),
+                _ => CalcResult::Number(0.0),
+            },
+            _ => CalcResult::Number(0.0),
+        }
+    }
+
+    /// Clears the values of all formulas, so that an iterative calculation always
+    /// starts from zero, whatever the workbook held before.
+    fn forget_formula_values(&mut self) {
+        for worksheet in &mut self.workbook.worksheets {
+            let formulas: Vec<(i32, i32)> = worksheet
+                .sheet_data
+                .cells()
+                .filter(|(_, _, cell)| FormulaCell::of(cell).is_some())
+                .map(|(row, column, _)| (row, column))
+                .collect();
+            for (row, column) in formulas {
+                if let Some(Cell::CellFormula { v, .. } | Cell::ArrayFormula { v, .. }) =
+                    worksheet.sheet_data.cell_mut(row, column)
+                {
+                    *v = FormulaValue::Unevaluated;
+                }
+            }
+        }
+    }
+
+    fn cycle_reads_time_or_random(&self) -> bool {
+        let mut pending: Vec<_> = self.evaluation.iterative_cells.iter().copied().collect();
+        let mut seen = HashSet::new();
+        while let Some(cell) = pending.pop() {
+            if !seen.insert(cell) {
+                continue;
+            }
+            if self.evaluation.time_or_random.contains(&cell) {
+                return true;
+            }
+            if let Some(reads) = self.evaluation.runtime_reads.get(&cell) {
+                pending.extend(reads);
+            }
+        }
+        false
+    }
+
+    /// Maximum simultaneously active LAMBDA calls (default 256, minimum 1).
+    /// The evaluation stack-byte budget can stop a call before this limit.
+    pub fn set_max_lambda_depth(&mut self, depth: usize) {
+        self.evaluation.max_lambda_depth = depth.max(1);
+    }
+
+    /// Returns the limit set by [`Model::set_max_lambda_depth`].
+    pub fn get_max_lambda_depth(&self) -> usize {
+        self.evaluation.max_lambda_depth
+    }
+
+    pub(crate) fn lambda_entry(&mut self, cell: CellReferenceIndex) -> Result<(), CalcResult> {
+        let state = &mut self.evaluation;
+        if state.unwinding || state.restart.is_some() {
+            return Err(CalcResult::EmptyCell);
+        }
+        let here = stack_address();
+        if state.depth == 0 && state.lambda_depth == 0 {
+            state.stack_base = here;
+        }
+        if state.lambda_depth >= state.max_lambda_depth
+            || state.stack_base.abs_diff(here) >= state.max_stack
+        {
+            // Replaying the innermost cell may free the stack consumed by its
+            // callers. A LAMBDA that cannot fit in one cell has no continuation
+            // to replay and must return a bounded diagnostic instead.
+            if state.depth > 1 {
+                state.unwinding = true;
+                return Err(CalcResult::EmptyCell);
+            }
+            state.recursion_failures.insert(key(cell));
+            state.recursion_limit_hit = true;
+            return Err(CalcResult::new_error(
+                Error::NUM,
+                cell,
+                "LAMBDA recursion limit reached".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Sets how many formulas deep the evaluation may recurse. A formula that
@@ -687,6 +1035,15 @@ impl<'a> Model<'a> {
     /// the reason the pass had to be abandoned, if any.
     fn run_pass(&mut self, circular_anchors: &[CellKey]) -> Option<Restart> {
         let state = &mut self.evaluation;
+        state.recursion_failures.clear();
+        state.recursion_limit_hit = false;
+        state.runtime_reads.clear();
+        state.time_or_random.clear();
+        state.spill_changed = false;
+        if state.iterating {
+            state.iterative_cells.clear();
+            state.loop_met = false;
+        }
         state.cells.clear();
         state.stack.clear();
         state.seen.clear();
@@ -743,6 +1100,15 @@ impl<'a> Model<'a> {
                 None => Found::Constant(self.get_cell_value(cell, cell_reference)),
             },
         };
+        if self.evaluation.iterating && matches!(&found, Found::Formula(_) | Found::Spill(_)) {
+            if let Some(reader) = self.evaluation.stack.last() {
+                self.evaluation
+                    .runtime_reads
+                    .entry(key(*reader))
+                    .or_default()
+                    .insert(key(cell_reference));
+            }
+        }
         match found {
             Found::Nothing => {
                 self.record_seen(cell_reference, Seen::Empty);
@@ -771,6 +1137,13 @@ impl<'a> Model<'a> {
             row: anchor.0,
             column: anchor.1,
         };
+        if self.evaluation.iterating {
+            self.evaluation
+                .runtime_reads
+                .entry(key(cell_reference))
+                .or_default()
+                .insert(key(anchor_reference));
+        }
         let kind = match self.fetch_cell(anchor_reference).as_deref() {
             Some(Cell::ArrayFormula { kind, .. }) => Some(kind.clone()),
             _ => None,
@@ -828,6 +1201,25 @@ impl<'a> Model<'a> {
         let key = key(cell_reference);
         match self.evaluation.cells.get(&key) {
             Some(CellState::Evaluating) => {
+                if self.evaluation.iterating {
+                    self.evaluation.loop_met = true;
+                    if let Some(start) = self
+                        .evaluation
+                        .stack
+                        .iter()
+                        .position(|c| *c == cell_reference)
+                    {
+                        for cell in &self.evaluation.stack[start..] {
+                            self.evaluation.iterative_cells.insert((
+                                cell.sheet,
+                                cell.row,
+                                cell.column,
+                            ));
+                        }
+                    }
+                    self.evaluation.iterative_cells.insert(key);
+                    return self.previous_value(cell_reference);
+                }
                 self.mark_cycle(cell_reference);
                 return circular_reference(cell_reference);
             }
@@ -911,6 +1303,12 @@ impl<'a> Model<'a> {
     /// A read that closes a loop through it is then still a cycle.
     fn run_top(&mut self, cell_reference: CellReferenceIndex, cell: FormulaCell) -> CalcResult {
         let key = key(cell_reference);
+        self.evaluation.recursion_failures.remove(&key);
+        self.evaluation.recursion_limit_hit = !self.evaluation.recursion_failures.is_empty();
+        if self.evaluation.iterating {
+            self.evaluation.runtime_reads.remove(&key);
+            self.evaluation.time_or_random.remove(&key);
+        }
         // A formula can attach a link to its cell as it runs (HYPERLINK). A
         // run that was abandoned to an unwind may have attached one on the
         // strength of values it never really read; this run decides afresh.
@@ -925,6 +1323,8 @@ impl<'a> Model<'a> {
         };
         self.evaluation.depth -= 1;
         if self.evaluation.unwinding {
+            self.evaluation.recursion_failures.remove(&key);
+            self.evaluation.recursion_limit_hit = !self.evaluation.recursion_failures.is_empty();
             return CalcResult::EmptyCell;
         }
         // The cell may have been found on a cycle while it ran.
@@ -946,6 +1346,8 @@ impl<'a> Model<'a> {
             return CalcResult::new_error(Error::ERROR, cell_reference, message);
         }
         if self.evaluation.restart.is_some() {
+            self.evaluation.recursion_failures.remove(&key);
+            self.evaluation.recursion_limit_hit = !self.evaluation.recursion_failures.is_empty();
             return CalcResult::EmptyCell;
         }
         self.evaluation.cells.insert(key, CellState::Evaluated);

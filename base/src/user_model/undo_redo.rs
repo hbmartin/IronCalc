@@ -523,6 +523,17 @@ impl<'a> UserModel<'a> {
                 } => {
                     self.model.set_timezone(old_value)?;
                 }
+                Diff::SetIterativeCalculation {
+                    old_value,
+                    new_value: _,
+                } => {
+                    self.model.set_iterative_calculation_without_evaluation(
+                        old_value.enabled,
+                        old_value.maximum_iterations,
+                        old_value.maximum_change,
+                    )?;
+                    needs_evaluation = true;
+                }
                 Diff::SetWorkbookName {
                     old_value,
                     new_value: _,
@@ -644,6 +655,9 @@ impl<'a> UserModel<'a> {
             }
         }
         if needs_evaluation {
+            // A batch may move cells using several value diffs. The caller
+            // cannot supply those implicit edits to an incremental calculation.
+            self.model.invalidate_calculation();
             self.evaluate_if_not_paused();
         }
         Ok(())
@@ -981,6 +995,17 @@ impl<'a> UserModel<'a> {
                 } => {
                     self.model.set_timezone(new_value)?;
                 }
+                Diff::SetIterativeCalculation {
+                    old_value: _,
+                    new_value,
+                } => {
+                    self.model.set_iterative_calculation_without_evaluation(
+                        new_value.enabled,
+                        new_value.maximum_iterations,
+                        new_value.maximum_change,
+                    )?;
+                    needs_evaluation = true;
+                }
                 Diff::SetWorkbookName {
                     old_value: _,
                     new_value,
@@ -1096,6 +1121,7 @@ impl<'a> UserModel<'a> {
         }
 
         if needs_evaluation {
+            self.model.invalidate_calculation();
             self.evaluate_if_not_paused();
         }
         Ok(())

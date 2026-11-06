@@ -19,6 +19,21 @@ impl<'a> Model<'a> {
         call_args: &[Node],
         cell: CellReferenceIndex,
     ) -> CalcResult {
+        if let Err(result) = self.lambda_entry(cell) {
+            return result;
+        }
+        self.evaluation.lambda_depth += 1;
+        let result = self.call_lambda_inner(lambda_result, call_args, cell);
+        self.evaluation.lambda_depth -= 1;
+        result
+    }
+
+    fn call_lambda_inner(
+        &mut self,
+        lambda_result: CalcResult,
+        call_args: &[Node],
+        cell: CellReferenceIndex,
+    ) -> CalcResult {
         let (parameters, body) = match lambda_result {
             CalcResult::Lambda(id) => match self.lambdas.get(&id) {
                 Some(l) => l.clone(),
@@ -71,6 +86,21 @@ impl<'a> Model<'a> {
     /// Like `call_lambda` but accepts already-evaluated `CalcResult` values instead of `Node`s.
     /// Optional parameters not covered by `values` receive EmptyArg.
     pub(crate) fn call_lambda_with_values(
+        &mut self,
+        lambda_result: CalcResult,
+        values: Vec<CalcResult>,
+        cell: CellReferenceIndex,
+    ) -> CalcResult {
+        if let Err(result) = self.lambda_entry(cell) {
+            return result;
+        }
+        self.evaluation.lambda_depth += 1;
+        let result = self.call_lambda_with_values_inner(lambda_result, values, cell);
+        self.evaluation.lambda_depth -= 1;
+        result
+    }
+
+    fn call_lambda_with_values_inner(
         &mut self,
         lambda_result: CalcResult,
         values: Vec<CalcResult>,

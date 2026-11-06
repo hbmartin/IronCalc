@@ -192,6 +192,11 @@ impl<'a> UserModel<'a> {
         clipboard: &ClipboardData,
         is_cut: bool,
     ) -> Result<(), String> {
+        if is_cut {
+            // Moving cells also rewrites references outside the pasted area.
+            // Invalidate before any mutation, including while evaluation is paused.
+            self.model.invalidate_calculation();
+        }
         let mut diff_list = Vec::new();
         let view = self.get_selected_view();
         let (source_first_row, source_first_column, source_last_row, source_last_column) =

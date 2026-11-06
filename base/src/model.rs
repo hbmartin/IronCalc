@@ -220,6 +220,7 @@ pub struct Model<'a> {
     pub(crate) last_lambda_id: usize,
     /// Everything the evaluation algorithm needs besides the workbook. See `evaluation.rs`.
     pub(crate) evaluation: Evaluation,
+    pub(crate) dependency_index: Option<Arc<crate::incremental::DependencyIndex>>,
     /// Evaluated CF results per cell, keyed by (sheet_index, row, column).
     /// Rebuilt from scratch on every call to evaluate_conditional_formatting().
     pub(crate) cf_cache: HashMap<(u32, i32, i32), Vec<CfCellResult>>,
@@ -234,7 +235,7 @@ pub struct Model<'a> {
 }
 
 /// Formula text to index in `Worksheet::shared_formulas`, for one sheet.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct SharedFormulaLookup {
     pub(crate) index: HashMap<String, i32>,
     /// How many formulas of the list the index was built from. A formula the
@@ -270,6 +271,42 @@ pub struct CellIndex {
 }
 
 impl<'a> Model<'a> {
+    /// Independent mutable values/scratch with shared immutable parsed formula
+    /// trees and dependency index. Intended for a bounded native worker pool.
+    /// The source must have completed a successful full evaluation first.
+    pub fn fork_evaluation_session(&self) -> Result<Model<'a>, String> {
+        if !self.evaluation.report.converged || self.evaluation.report.iterations == 0 {
+            return Err("evaluate a converged baseline before forking a session".to_string());
+        }
+        let mut evaluation = Evaluation::default();
+        evaluation.cells = self.evaluation.cells.clone();
+        evaluation.report = self.evaluation.report.clone();
+        evaluation.anchor_order = self.evaluation.anchor_order.clone();
+        evaluation.max_depth = self.evaluation.max_depth;
+        evaluation.max_stack = self.evaluation.max_stack;
+        evaluation.max_lambda_depth = self.evaluation.max_lambda_depth;
+        evaluation.scalar_only = self.evaluation.scalar_only;
+        Ok(Model {
+            workbook: self.workbook.clone(),
+            parsed_formulas: self.parsed_formulas.clone(),
+            shared_formula_lookup: self.shared_formula_lookup.clone(),
+            parsed_defined_names: self.parsed_defined_names.clone(),
+            shared_strings: self.shared_strings.clone(),
+            parser: self.parser.clone(),
+            locale: self.locale,
+            language: self.language,
+            tz: Tz::parse(&self.workbook.settings.tz)?,
+            variable_stack: HashMap::new(),
+            last_variable_id: 0,
+            lambdas: HashMap::new(),
+            last_lambda_id: 0,
+            evaluation,
+            dependency_index: self.dependency_index.clone(),
+            cf_cache: HashMap::new(),
+            links: self.links.clone(),
+        })
+    }
+
     pub(crate) fn get_next_variable_id(&mut self) -> usize {
         let id = self.last_variable_id;
         self.last_variable_id += 1;
@@ -1260,6 +1297,7 @@ impl<'a> Model<'a> {
         let CellReferenceIndex { sheet, row, column } = anchor;
         let height = array.len() as i32;
         let width = array[0].len() as i32;
+        self.evaluation.spill_changed |= (width, height) != (1, 1) || old_area != (width, height);
         let spill_error = |message: &str| {
             Some(CalcResult::new_error(
                 Error::SPILL,
@@ -1860,6 +1898,7 @@ impl<'a> Model<'a> {
             lambdas: HashMap::new(),
             last_lambda_id: 0,
             evaluation: Evaluation::default(),
+            dependency_index: None,
             cf_cache: HashMap::new(),
             links: HashMap::new(),
         };
@@ -3316,6 +3355,7 @@ impl<'a> Model<'a> {
     // * Delete the spilled cells
     // * Update the formula cell to be DynamicFormula with r = (1,1)
     pub(crate) fn reset_dynamic_array_spills(&mut self, sheet: u32) -> Result<(), String> {
+        self.invalidate_calculation();
         // Collect anchor info first — can't mutate sheet_data while iterating over it.
         let anchors: Vec<(i32, i32, i32, i32, i32, i32)> = {
             let ws = self.workbook.worksheet(sheet)?;
@@ -3881,6 +3921,56 @@ impl<'a> Model<'a> {
         self.workbook.settings.tz = timezone.to_string();
         self.evaluate();
         Ok(())
+    }
+
+    /// Sets the iterative calculation settings of the workbook and evaluates it again.
+    ///
+    /// With `enabled` set, the cells that take part in a circular reference are
+    /// recalculated until the largest change of any cell between two recalculations
+    /// is smaller than a positive `maximum_change` (exact equality when zero), or
+    /// `maximum_iterations` recalculations have run, whichever happens first.
+    /// Boolean values and numeric/Boolean types must match exactly.
+    /// A cell that has no value yet counts as zero
+    /// the first time it is read, and a cell that is being calculated contributes the
+    /// value it held after the previous recalculation. There is no error if the values
+    /// do not settle within the limit; inspect `evaluation_report()` afterwards.
+    ///
+    /// With `enabled` unset, a circular reference evaluates to `#CIRC!`.
+    pub fn set_iterative_calculation(
+        &mut self,
+        enabled: bool,
+        maximum_iterations: u32,
+        maximum_change: f64,
+    ) -> Result<(), String> {
+        self.set_iterative_calculation_without_evaluation(
+            enabled,
+            maximum_iterations,
+            maximum_change,
+        )?;
+        self.evaluate();
+        Ok(())
+    }
+
+    pub(crate) fn set_iterative_calculation_without_evaluation(
+        &mut self,
+        enabled: bool,
+        maximum_iterations: u32,
+        maximum_change: f64,
+    ) -> Result<(), String> {
+        let settings = IterativeCalculation {
+            enabled,
+            maximum_iterations,
+            maximum_change,
+        };
+        settings.validate()?;
+        self.workbook.settings.iterative_calculation = settings;
+        self.invalidate_calculation();
+        Ok(())
+    }
+
+    /// Gets the iterative calculation settings of the workbook
+    pub fn get_iterative_calculation(&self) -> IterativeCalculation {
+        self.workbook.settings.iterative_calculation.clone()
     }
 
     /// Sets the language

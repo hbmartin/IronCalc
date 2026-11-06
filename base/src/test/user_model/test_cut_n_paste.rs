@@ -7,6 +7,41 @@ use crate::test::util::new_empty_model;
 use crate::UserModel;
 
 #[test]
+fn paused_cell_and_area_moves_invalidate_incremental_state() {
+    for width in [1, 2] {
+        let mut model = new_empty_user_model();
+        model.set_user_input(0, 1, 1, "3").unwrap();
+        model.set_user_input(0, 1, 2, "=A1*2").unwrap();
+        model.set_user_input(0, 1, 4, "=B1+1").unwrap();
+        assert!(model.model.evaluate_incremental_headless(&[]).is_some());
+        model.set_selected_range(1, 1, 1, width).unwrap();
+        let clipboard = model.copy_to_clipboard().unwrap();
+        model.set_selected_cell(3, 1).unwrap();
+        model.pause_evaluation();
+        model
+            .paste_from_clipboard(0, clipboard.range, &clipboard.data, true)
+            .unwrap();
+        assert_eq!(model.model.evaluation_report().iterations, 0);
+        assert!(model.get_model().fork_evaluation_session().is_err());
+        model.model._set("A3", "5");
+        assert!(model
+            .model
+            .evaluate_incremental_headless(&[(0, 3, 1)])
+            .is_none());
+        assert_eq!(model.get_formatted_cell_value(0, 1, 4).unwrap(), "11");
+        assert!(model.model.evaluate_incremental_headless(&[]).is_some());
+        model.undo().unwrap();
+        assert_eq!(model.model.evaluation_report().iterations, 0);
+        assert!(model.model.evaluate_incremental_headless(&[]).is_none());
+        assert_eq!(model.get_formatted_cell_value(0, 1, 4).unwrap(), "7");
+        model.redo().unwrap();
+        assert_eq!(model.model.evaluation_report().iterations, 0);
+        assert!(model.model.evaluate_incremental_headless(&[]).is_none());
+        assert_eq!(model.get_formatted_cell_value(0, 1, 4).unwrap(), "7");
+    }
+}
+
+#[test]
 fn cun_n_paste_same_area() {
     let model = new_empty_model();
     let mut model = UserModel::from_model(model);

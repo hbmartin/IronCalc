@@ -2316,6 +2316,23 @@ impl<'a> Model<'a> {
         args: &[Node],
         cell: CellReferenceIndex,
     ) -> CalcResult {
+        if self.evaluation.unwinding || self.evaluation.restart.is_some() {
+            return CalcResult::EmptyCell;
+        }
+        if self.evaluation.iterating
+            && matches!(
+                kind,
+                Function::Rand
+                    | Function::Randbetween
+                    | Function::Randarray
+                    | Function::Now
+                    | Function::Today
+            )
+        {
+            self.evaluation
+                .time_or_random
+                .insert((cell.sheet, cell.row, cell.column));
+        }
         match kind {
             Function::And => self.fn_and(args, cell),
             Function::False => self.fn_false(args, cell),
