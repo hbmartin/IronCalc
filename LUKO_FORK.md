@@ -17,3 +17,10 @@ Use XLSX as the interchange format; do not assume old `.icalc` files load.
 
 Only generic calculation changes and synthetic tests belong here. Application
 code and proprietary financial workbook fixtures stay in the private backend.
+
+Incremental invalidation adapts the AST dependency extraction from unmerged
+[upstream PR #1435](https://github.com/ironcalc/IronCalc/pull/1435), by svettypoo.
+This version deduplicates rectangle ranges, shares the immutable index between
+sessions, and uses the current upstream demand evaluator. Iterative and array
+calculations conservatively fall back to full headless calculation. Call a full
+evaluation after structural changes; pass all edited cells to incremental calls.

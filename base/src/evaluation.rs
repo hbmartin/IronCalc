@@ -523,6 +523,7 @@ impl<'a> Model<'a> {
 
     /// Calculates without rebuilding conditional-formatting/UI caches.
     pub fn evaluate_headless(&mut self) {
+        self.dependency_index = None;
         let settings = self.workbook.settings.iterative_calculation.clone();
         self.evaluation.report = CalculationReport::default();
         if settings.validate().is_err() {

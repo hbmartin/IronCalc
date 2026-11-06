@@ -220,6 +220,7 @@ pub struct Model<'a> {
     pub(crate) last_lambda_id: usize,
     /// Everything the evaluation algorithm needs besides the workbook. See `evaluation.rs`.
     pub(crate) evaluation: Evaluation,
+    pub(crate) dependency_index: Option<Arc<crate::incremental::DependencyIndex>>,
     /// Evaluated CF results per cell, keyed by (sheet_index, row, column).
     /// Rebuilt from scratch on every call to evaluate_conditional_formatting().
     pub(crate) cf_cache: HashMap<(u32, i32, i32), Vec<CfCellResult>>,
@@ -234,7 +235,7 @@ pub struct Model<'a> {
 }
 
 /// Formula text to index in `Worksheet::shared_formulas`, for one sheet.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct SharedFormulaLookup {
     pub(crate) index: HashMap<String, i32>,
     /// How many formulas of the list the index was built from. A formula the
@@ -270,6 +271,38 @@ pub struct CellIndex {
 }
 
 impl<'a> Model<'a> {
+    /// Independent mutable values/scratch with shared immutable parsed formula
+    /// trees and dependency index. Intended for a bounded native worker pool.
+    /// The source must have completed a successful full evaluation first.
+    pub fn fork_evaluation_session(&self) -> Result<Model<'a>, String> {
+        if !self.evaluation.report.converged || self.evaluation.report.iterations == 0 {
+            return Err("evaluate a converged baseline before forking a session".to_string());
+        }
+        let mut evaluation = Evaluation::default();
+        evaluation.cells = self.evaluation.cells.clone();
+        evaluation.report = self.evaluation.report.clone();
+        evaluation.anchor_order = self.evaluation.anchor_order.clone();
+        Ok(Model {
+            workbook: self.workbook.clone(),
+            parsed_formulas: self.parsed_formulas.clone(),
+            shared_formula_lookup: self.shared_formula_lookup.clone(),
+            parsed_defined_names: self.parsed_defined_names.clone(),
+            shared_strings: self.shared_strings.clone(),
+            parser: self.parser.clone(),
+            locale: self.locale,
+            language: self.language,
+            tz: Tz::parse(&self.workbook.settings.tz)?,
+            variable_stack: HashMap::new(),
+            last_variable_id: 0,
+            lambdas: HashMap::new(),
+            last_lambda_id: 0,
+            evaluation,
+            dependency_index: self.dependency_index.clone(),
+            cf_cache: HashMap::new(),
+            links: HashMap::new(),
+        })
+    }
+
     pub(crate) fn get_next_variable_id(&mut self) -> usize {
         let id = self.last_variable_id;
         self.last_variable_id += 1;
@@ -1860,6 +1893,7 @@ impl<'a> Model<'a> {
             lambdas: HashMap::new(),
             last_lambda_id: 0,
             evaluation: Evaluation::default(),
+            dependency_index: None,
             cf_cache: HashMap::new(),
             links: HashMap::new(),
         };
