@@ -102,10 +102,48 @@ pub struct Metadata {
     pub last_modified: String, //"2020-11-20T16:24:35"
 }
 
-#[derive(Encode, Decode, Debug, PartialEq, Eq, Clone)]
+/// Settings for resolving circular references by repeated recalculation.
+///
+/// They mirror the `iterate`, `iterateCount` and `iterateDelta` attributes of the
+/// `calcPr` element of an xlsx file.
+#[derive(Encode, Decode, Debug, PartialEq, Clone)]
+pub struct IterativeCalculation {
+    /// When false a circular reference evaluates to `#CIRC!`.
+    pub enabled: bool,
+    /// The most recalculations that are run.
+    pub maximum_iterations: u32,
+    /// Recalculation stops once no cell changes by this much or more.
+    pub maximum_change: f64,
+}
+
+impl Default for IterativeCalculation {
+    fn default() -> Self {
+        IterativeCalculation {
+            enabled: false,
+            maximum_iterations: 100,
+            maximum_change: 0.001,
+        }
+    }
+}
+
+impl IterativeCalculation {
+    /// Validate API and imported settings before they can control evaluation.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=10_000).contains(&self.maximum_iterations) {
+            return Err("maximum_iterations must be between 1 and 10000".to_string());
+        }
+        if !self.maximum_change.is_finite() || self.maximum_change <= 0.0 {
+            return Err("maximum_change must be finite and positive".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Encode, Decode, Debug, PartialEq, Clone)]
 pub struct WorkbookSettings {
     pub tz: String,
     pub locale: String,
+    pub iterative_calculation: IterativeCalculation,
 }
 
 /// An internal representation of an IronCalc Workbook
