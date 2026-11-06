@@ -80,7 +80,9 @@ pub(super) fn load_workbook<R: Read + std::io::Seek>(
             iterative_calculation.maximum_change = delta.trim().parse::<f64>()?;
         }
     }
-    iterative_calculation.validate().map_err(XlsxError::Workbook)?;
+    iterative_calculation
+        .validate()
+        .map_err(XlsxError::Workbook)?;
     // read the relationships file
     Ok(WorkbookXML {
         worksheets: sheets,

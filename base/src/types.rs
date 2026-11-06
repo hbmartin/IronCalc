@@ -139,6 +139,39 @@ impl IterativeCalculation {
     }
 }
 
+/// The outcome of a calculation, independent of individual spreadsheet values.
+/// A caller saving simulation results must reject a report with `converged=false`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalculationReport {
+    pub converged: bool,
+    pub iterations: u32,
+    pub residual: f64,
+    pub had_circular_references: bool,
+    pub failure: Option<CalculationFailure>,
+}
+
+impl Default for CalculationReport {
+    fn default() -> Self {
+        Self {
+            converged: true,
+            iterations: 0,
+            residual: 0.0,
+            had_circular_references: false,
+            failure: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CalculationFailure {
+    InvalidSettings,
+    CircularReference,
+    IterationLimit,
+    NonNumericCycle,
+    NonFiniteValue,
+    CyclicArray,
+}
+
 #[derive(Encode, Decode, Debug, PartialEq, Clone)]
 pub struct WorkbookSettings {
     pub tz: String,

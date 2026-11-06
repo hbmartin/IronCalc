@@ -2240,7 +2240,12 @@ impl<'a> UserModel<'a> {
         maximum_iterations: u32,
         maximum_change: f64,
     ) -> Result<(), String> {
-        IterativeCalculation { enabled, maximum_iterations, maximum_change }.validate()?;
+        IterativeCalculation {
+            enabled,
+            maximum_iterations,
+            maximum_change,
+        }
+        .validate()?;
         let diff_list = vec![Diff::SetIterativeCalculation {
             old_value: self.get_iterative_calculation(),
             new_value: IterativeCalculation {
