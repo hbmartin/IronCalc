@@ -29,6 +29,39 @@ pub(crate) struct DependencyIndex {
     volatile: HashSet<Key>,
     has_arrays: bool,
 }
+/// Detect time/randomness that must not change between fixed-point passes.
+pub(crate) fn has_time_or_random(node: &Node) -> bool {
+    match node {
+        Node::FunctionKind { kind, args } => {
+            matches!(
+                kind,
+                Function::Now
+                    | Function::Today
+                    | Function::Rand
+                    | Function::Randbetween
+                    | Function::Randarray
+            ) || args.iter().any(has_time_or_random)
+        }
+        Node::OpRangeKind { left, right }
+        | Node::OpConcatenateKind { left, right }
+        | Node::OpSumKind { left, right, .. }
+        | Node::OpProductKind { left, right, .. }
+        | Node::OpPowerKind { left, right }
+        | Node::CompareKind { left, right, .. } => {
+            has_time_or_random(left) || has_time_or_random(right)
+        }
+        Node::LambdaDefKind { body, .. } => has_time_or_random(body),
+        Node::LambdaCallKind { lambda, args } => {
+            has_time_or_random(lambda) || args.iter().any(has_time_or_random)
+        }
+        Node::NamedFunctionKind { args, .. } => args.iter().any(has_time_or_random),
+        Node::ImplicitIntersection { child, .. }
+        | Node::SpillRangeOperator { child }
+        | Node::UnaryKind { right: child, .. } => has_time_or_random(child),
+        _ => false,
+    }
+}
+
 fn is_volatile(kind: &Function) -> bool {
     matches!(
         kind,
@@ -311,6 +344,8 @@ impl Model<'_> {
         self.evaluation.depth = 0;
         self.evaluation.unwinding = false;
         self.evaluation.in_pass = true;
+        self.evaluation.recursion_limit_hit = false;
+        self.evaluation.lambda_depth = 0;
         self.clear_variable_stack();
         self.clear_lambdas();
         for &(sheet, row, column) in &dirty {
@@ -333,7 +368,10 @@ impl Model<'_> {
                     )
                 })
         });
-        if self.evaluation.restart.is_some() || !self.evaluation.circular.is_empty() || became_array
+        if self.evaluation.restart.is_some()
+            || !self.evaluation.circular.is_empty()
+            || became_array
+            || self.evaluation.recursion_limit_hit
         {
             self.evaluate_headless();
             return None;

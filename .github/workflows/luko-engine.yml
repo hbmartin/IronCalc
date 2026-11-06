@@ -1,0 +1,17 @@
+name: Calculation fork
+on:
+  push:
+    branches: [luko-simulation]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  calculation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo test -p ironcalc_base --lib
+      - run: cargo test -p ironcalc --lib --test test_iterative_calculation
+      - run: cargo clippy -p ironcalc_base --lib -- -D warnings

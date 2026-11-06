@@ -291,3 +291,37 @@ fn a_cell_outside_the_cycle_can_be_edited() {
     assert_close(number(&model, "A1"), 45.0);
     assert_close(number(&model, "B1"), 50.0);
 }
+
+#[test]
+fn nonterminating_lambda_returns_a_bounded_diagnostic() {
+    use crate::types::CalculationFailure;
+    let mut model = new_empty_model();
+    model
+        .new_defined_name("FACTORIAL", None, "LAMBDA(x,IF(x=1,1,x*FACTORIAL(x-1)))")
+        .unwrap();
+    model._set("A1", "=FACTORIAL(2.5)");
+    model.evaluate_headless();
+    assert_eq!(model._get_text("A1"), "#NUM!");
+    assert_eq!(
+        model.evaluation_report().failure,
+        Some(CalculationFailure::RecursionLimit)
+    );
+    model._set("A1", "=FACTORIAL(5)");
+    model.evaluate_headless();
+    assert_eq!(number(&model, "A1"), 120.0);
+    assert!(model.evaluation_report().converged);
+}
+
+#[test]
+fn stochastic_values_cannot_create_false_convergence() {
+    use crate::types::CalculationFailure;
+    let mut model = new_empty_model();
+    model._set("B1", "=RAND()");
+    model._set("A1", "=A1/2+B1");
+    model.set_iterative_calculation(true, 100, 1e-9).unwrap();
+    assert_eq!(
+        model.evaluation_report().failure,
+        Some(CalculationFailure::VolatileCycle)
+    );
+    assert!(!model.evaluation_report().converged);
+}

@@ -433,6 +433,8 @@ pub(crate) struct Evaluation {
     pub(crate) loop_met: bool,
     pub(crate) iterative_cells: HashSet<CellKey>,
     pub(crate) report: CalculationReport,
+    pub(crate) lambda_depth: usize,
+    pub(crate) recursion_limit_hit: bool,
 }
 
 /// How deep the recursion may go when nobody has said otherwise, in formulas
@@ -487,6 +489,8 @@ impl Default for Evaluation {
             loop_met: false,
             iterative_cells: HashSet::new(),
             report: CalculationReport::default(),
+            lambda_depth: 0,
+            recursion_limit_hit: false,
         }
     }
 }
@@ -526,6 +530,8 @@ impl<'a> Model<'a> {
         self.dependency_index = None;
         let settings = self.workbook.settings.iterative_calculation.clone();
         self.evaluation.report = CalculationReport::default();
+        self.evaluation.recursion_limit_hit = false;
+        self.evaluation.lambda_depth = 0;
         if settings.validate().is_err() {
             self.evaluation.report.converged = false;
             self.evaluation.report.failure = Some(CalculationFailure::InvalidSettings);
@@ -543,6 +549,10 @@ impl<'a> Model<'a> {
                 had_circular_references: cyclic,
                 failure: cyclic.then_some(CalculationFailure::CircularReference),
             };
+        }
+        if self.evaluation.recursion_limit_hit {
+            self.evaluation.report.converged = false;
+            self.evaluation.report.failure = Some(CalculationFailure::RecursionLimit);
         }
     }
 
@@ -566,6 +576,17 @@ impl<'a> Model<'a> {
         self.evaluation.iterative_cells.clear();
         let mut previous = self.formula_numbers();
         let mut restarts = 0;
+        let has_unfrozen_values = self
+            .parsed_formulas
+            .iter()
+            .flatten()
+            .any(|(node, _)| crate::incremental::has_time_or_random(node))
+            || self.parsed_defined_names.values().any(|name| match name {
+                crate::model::ParsedDefinedName::LambdaDefinition(_, body) => {
+                    crate::incremental::has_time_or_random(body)
+                }
+                _ => false,
+            });
         self.evaluation.report.converged = false;
         self.evaluation.report.failure = Some(CalculationFailure::IterationLimit);
         for iteration in 1..=settings.maximum_iterations {
@@ -585,6 +606,10 @@ impl<'a> Model<'a> {
                 break;
             }
             let current = self.formula_numbers();
+            if has_unfrozen_values {
+                self.evaluation.report.failure = Some(CalculationFailure::VolatileCycle);
+                break;
+            }
             let mut change = 0.0_f64;
             let mut failure = None;
             for &(sheet, row, column) in &self.evaluation.iterative_cells {

@@ -170,6 +170,8 @@ pub enum CalculationFailure {
     NonNumericCycle,
     NonFiniteValue,
     CyclicArray,
+    RecursionLimit,
+    VolatileCycle,
 }
 
 #[derive(Encode, Decode, Debug, PartialEq, Clone)]
