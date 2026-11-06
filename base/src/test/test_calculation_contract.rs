@@ -421,6 +421,21 @@ fn abandoned_pass_discards_volatility_and_recursion_diagnostics() {
 }
 
 #[test]
+fn cse_anchors_use_full_evaluation_without_building_an_index() {
+    let mut m = new_empty_model();
+    m._set("A1", "3");
+    m.set_user_array_formula(0, 1, 2, 1, 1, "=A1*2").unwrap();
+    m._set("C1", "=B1+1");
+    m.evaluate_headless();
+    for n in [4, 7] {
+        m._set("A1", &n.to_string());
+        assert!(m.evaluate_incremental_headless(&[(0, 1, 1)]).is_none());
+        assert_eq!(number(&m, "C1"), (n * 2 + 1) as f64);
+    }
+    assert_eq!(m.evaluation.dependency_index_builds, 0);
+}
+
+#[test]
 fn genuine_array_and_cse_cycles_still_fail() {
     let mut m = new_empty_model();
     m._set("A1", "=SEQUENCE(2,1,A1/2+10)");

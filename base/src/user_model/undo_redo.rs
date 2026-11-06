@@ -655,6 +655,9 @@ impl<'a> UserModel<'a> {
             }
         }
         if needs_evaluation {
+            // A batch may move cells using several value diffs. The caller
+            // cannot supply those implicit edits to an incremental calculation.
+            self.model.invalidate_calculation();
             self.evaluate_if_not_paused();
         }
         Ok(())
@@ -1118,6 +1121,7 @@ impl<'a> UserModel<'a> {
         }
 
         if needs_evaluation {
+            self.model.invalidate_calculation();
             self.evaluate_if_not_paused();
         }
         Ok(())
