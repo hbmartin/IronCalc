@@ -74,10 +74,28 @@ pub(super) fn load_workbook<R: Read + std::io::Seek>(
         iterative_calculation.enabled =
             parse_bool_with_default(calc_pr.attribute("iterate"), false);
         if let Some(count) = calc_pr.attribute("iterateCount") {
-            iterative_calculation.maximum_iterations = count.trim().parse::<u32>()?;
+            iterative_calculation.maximum_iterations = if iterative_calculation.enabled {
+                count.trim().parse::<u32>()?
+            } else {
+                count
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| (1..=32_767).contains(n))
+                    .unwrap_or(iterative_calculation.maximum_iterations)
+            };
         }
         if let Some(delta) = calc_pr.attribute("iterateDelta") {
-            iterative_calculation.maximum_change = delta.trim().parse::<f64>()?;
+            iterative_calculation.maximum_change = if iterative_calculation.enabled {
+                delta.trim().parse::<f64>()?
+            } else {
+                delta
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|n| n.is_finite() && *n >= 0.0)
+                    .unwrap_or(iterative_calculation.maximum_change)
+            };
         }
     }
     iterative_calculation

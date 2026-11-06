@@ -2255,8 +2255,12 @@ impl<'a> UserModel<'a> {
             },
         }];
         self.push_diff_list(diff_list);
-        self.model
-            .set_iterative_calculation(enabled, maximum_iterations, maximum_change)?;
+        self.model.set_iterative_calculation_without_evaluation(
+            enabled,
+            maximum_iterations,
+            maximum_change,
+        )?;
+        self.evaluate_if_not_paused();
         Ok(())
     }
 

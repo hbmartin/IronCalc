@@ -112,7 +112,8 @@ pub struct IterativeCalculation {
     pub enabled: bool,
     /// The most recalculations that are run.
     pub maximum_iterations: u32,
-    /// Recalculation stops once no cell changes by this much or more.
+    /// Numeric changes must be smaller than this tolerance; zero requires exact equality.
+    /// Boolean values must match exactly, independently of this tolerance.
     pub maximum_change: f64,
 }
 
@@ -129,11 +130,11 @@ impl Default for IterativeCalculation {
 impl IterativeCalculation {
     /// Validate API and imported settings before they can control evaluation.
     pub fn validate(&self) -> Result<(), String> {
-        if !(1..=10_000).contains(&self.maximum_iterations) {
-            return Err("maximum_iterations must be between 1 and 10000".to_string());
+        if !(1..=32_767).contains(&self.maximum_iterations) {
+            return Err("maximum_iterations must be between 1 and 32767".to_string());
         }
-        if !self.maximum_change.is_finite() || self.maximum_change <= 0.0 {
-            return Err("maximum_change must be finite and positive".to_string());
+        if !self.maximum_change.is_finite() || self.maximum_change < 0.0 {
+            return Err("maximum_change must be finite and nonnegative".to_string());
         }
         Ok(())
     }
@@ -145,6 +146,7 @@ impl IterativeCalculation {
 pub struct CalculationReport {
     pub converged: bool,
     pub iterations: u32,
+    /// Largest numeric delta, with a minimum of 1 for Boolean/type changes.
     pub residual: f64,
     pub had_circular_references: bool,
     pub failure: Option<CalculationFailure>,

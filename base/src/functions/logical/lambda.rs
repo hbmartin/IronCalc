@@ -19,13 +19,8 @@ impl<'a> Model<'a> {
         call_args: &[Node],
         cell: CellReferenceIndex,
     ) -> CalcResult {
-        if self.evaluation.lambda_depth >= 64 {
-            self.evaluation.recursion_limit_hit = true;
-            return CalcResult::new_error(
-                Error::NUM,
-                cell,
-                "LAMBDA recursion limit reached".to_string(),
-            );
+        if let Err(result) = self.lambda_entry(cell) {
+            return result;
         }
         self.evaluation.lambda_depth += 1;
         let result = self.call_lambda_inner(lambda_result, call_args, cell);
@@ -96,13 +91,8 @@ impl<'a> Model<'a> {
         values: Vec<CalcResult>,
         cell: CellReferenceIndex,
     ) -> CalcResult {
-        if self.evaluation.lambda_depth >= 64 {
-            self.evaluation.recursion_limit_hit = true;
-            return CalcResult::new_error(
-                Error::NUM,
-                cell,
-                "LAMBDA recursion limit reached".to_string(),
-            );
+        if let Err(result) = self.lambda_entry(cell) {
+            return result;
         }
         self.evaluation.lambda_depth += 1;
         let result = self.call_lambda_with_values_inner(lambda_result, values, cell);

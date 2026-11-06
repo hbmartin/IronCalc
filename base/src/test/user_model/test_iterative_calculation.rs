@@ -82,3 +82,68 @@ fn survives_a_round_trip_through_bytes() {
         }
     );
 }
+
+#[test]
+fn settings_and_history_respect_paused_evaluation() {
+    let mut m = new_empty_user_model();
+    m.set_user_input(0, 1, 1, "=A1/2+10").unwrap();
+    m.pause_evaluation();
+    m.set_iterative_calculation(true, 100, 1e-9).unwrap();
+    assert_eq!(m.model.evaluation_report().iterations, 0);
+    assert_eq!(m.get_formatted_cell_value(0, 1, 1).unwrap(), "#CIRC!");
+    m.evaluate();
+    assert_close(value(&m, 1, 1), 20.0);
+    m.undo().unwrap();
+    assert_eq!(m.model.evaluation_report().iterations, 0);
+    assert_close(value(&m, 1, 1), 20.0);
+    m.redo().unwrap();
+    assert_eq!(m.model.evaluation_report().iterations, 0);
+    m.resume_evaluation();
+    m.undo().unwrap();
+    assert_eq!(m.get_formatted_cell_value(0, 1, 1).unwrap(), "#CIRC!");
+    m.redo().unwrap();
+    assert_close(value(&m, 1, 1), 20.0);
+}
+
+#[test]
+fn mixed_setting_and_cell_batch_evaluates_only_once() {
+    use crate::user_model::history::{Diff, DiffType, QueueDiffs};
+    let mut m = new_empty_user_model();
+    let list = vec![
+        Diff::SetIterativeCalculation {
+            old_value: IterativeCalculation::default(),
+            new_value: IterativeCalculation {
+                enabled: true,
+                ..IterativeCalculation::default()
+            },
+        },
+        Diff::SetCellValue {
+            sheet: 0,
+            row: 1,
+            column: 1,
+            new_value: "=A1/2+10".into(),
+            old_value: Box::new(None),
+        },
+    ];
+    let before = m.model.evaluation.full_evaluations;
+    m.apply_external_diffs(&bitcode::encode(&vec![QueueDiffs {
+        r#type: DiffType::Redo,
+        list: list.clone(),
+    }]))
+    .unwrap();
+    assert_eq!(m.model.evaluation.full_evaluations, before + 1);
+    assert!(m.model.evaluation_report().converged);
+    m.apply_external_diffs(&bitcode::encode(&vec![QueueDiffs {
+        r#type: DiffType::Undo,
+        list: list.clone(),
+    }]))
+    .unwrap();
+    assert_eq!(m.model.evaluation.full_evaluations, before + 2);
+    m.pause_evaluation();
+    m.apply_external_diffs(&bitcode::encode(&vec![QueueDiffs {
+        r#type: DiffType::Redo,
+        list,
+    }]))
+    .unwrap();
+    assert_eq!(m.model.evaluation.full_evaluations, before + 2);
+}

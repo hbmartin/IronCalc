@@ -527,11 +527,12 @@ impl<'a> UserModel<'a> {
                     old_value,
                     new_value: _,
                 } => {
-                    self.model.set_iterative_calculation(
+                    self.model.set_iterative_calculation_without_evaluation(
                         old_value.enabled,
                         old_value.maximum_iterations,
                         old_value.maximum_change,
                     )?;
+                    needs_evaluation = true;
                 }
                 Diff::SetWorkbookName {
                     old_value,
@@ -995,11 +996,12 @@ impl<'a> UserModel<'a> {
                     old_value: _,
                     new_value,
                 } => {
-                    self.model.set_iterative_calculation(
+                    self.model.set_iterative_calculation_without_evaluation(
                         new_value.enabled,
                         new_value.maximum_iterations,
                         new_value.maximum_change,
                     )?;
+                    needs_evaluation = true;
                 }
                 Diff::SetWorkbookName {
                     old_value: _,

@@ -40,9 +40,8 @@ fn invalid_settings_are_rejected_without_mutating_settings() {
     let mut model = new_empty_model();
     for (iterations, delta) in [
         (0, 0.001),
-        (10001, 0.001),
+        (32768, 0.001),
         (100, -0.1),
-        (100, 0.0),
         (100, f64::NAN),
         (100, f64::INFINITY),
     ] {
@@ -241,30 +240,28 @@ fn a_workbook_without_cycles_is_evaluated_once() {
     assert!((0.0..1.0).contains(&without));
     model.set_iterative_calculation(true, 100, 1e-9).unwrap();
     assert_close(number(&model, "B1"), number(&model, "A1"));
+    assert_eq!(model.evaluation_report().iterations, 1);
 }
 
 #[test]
-fn settled_values_do_not_depend_on_the_order_of_entry() {
-    let formulas = [
-        ("A1", "=B1/2+10"),
-        ("B1", "=C1+5"),
-        ("C1", "=A1*0.25+B1*0.25"),
-        ("D1", "=C1+A1"),
-    ];
+fn settled_values_do_not_depend_on_cell_positions() {
     let mut forward = new_empty_model();
-    for (cell, formula) in formulas {
-        forward._set(cell, formula);
-    }
+    forward._set("A1", "=B1/2+10");
+    forward._set("B1", "=C1+5");
+    forward._set("C1", "=A1*0.25+B1*0.25");
+    forward._set("D1", "=C1+A1");
     forward.set_iterative_calculation(true, 200, 1e-12).unwrap();
     let mut backward = new_empty_model();
-    for (cell, formula) in formulas.iter().rev() {
-        backward._set(cell, formula);
-    }
+    backward._set("D1", "=C1/2+10");
+    backward._set("C1", "=B1+5");
+    backward._set("B1", "=D1*0.25+C1*0.25");
+    backward._set("A1", "=B1+D1");
     backward
         .set_iterative_calculation(true, 200, 1e-12)
         .unwrap();
-    for (cell, _) in formulas {
-        assert_close(number(&forward, cell), number(&backward, cell));
+    assert!(forward.evaluation_report().converged && backward.evaluation_report().converged);
+    for (left, right) in [("A1", "D1"), ("B1", "C1"), ("C1", "B1"), ("D1", "A1")] {
+        assert_close(number(&forward, left), number(&backward, right));
     }
 }
 

@@ -1,10 +1,11 @@
 //! Conservative dependency invalidation, adapted from upstream PR #1435.
 //! Demand evaluation decides runtime cycles; range edges never imply a cycle.
 use crate::{
+    evaluation::scalar_calculation_cell,
     expressions::{parser::Node, types::CellReferenceIndex},
     functions::Function,
     model::Model,
-    types::{CalculationFailure, CalculationReport, Cell},
+    types::{CalculationFailure, CalculationReport},
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -23,45 +24,12 @@ pub(crate) struct DependencyIndex {
     by_cell: HashMap<Key, Vec<Key>>,
     // Rectangles are deduplicated before column indexing. Thousands of lookups
     // can share one table range without thousands of duplicate containment tests.
-    by_column: HashMap<(u32, i32), Vec<IndexedSpan>>,
+    by_column: HashMap<(u32, i32), IntervalIndex>,
     wide: Vec<(Rectangle, usize)>,
     ranges: Vec<Vec<Key>>,
     volatile: HashSet<Key>,
     has_arrays: bool,
 }
-/// Detect time/randomness that must not change between fixed-point passes.
-pub(crate) fn has_time_or_random(node: &Node) -> bool {
-    match node {
-        Node::FunctionKind { kind, args } => {
-            matches!(
-                kind,
-                Function::Now
-                    | Function::Today
-                    | Function::Rand
-                    | Function::Randbetween
-                    | Function::Randarray
-            ) || args.iter().any(has_time_or_random)
-        }
-        Node::OpRangeKind { left, right }
-        | Node::OpConcatenateKind { left, right }
-        | Node::OpSumKind { left, right, .. }
-        | Node::OpProductKind { left, right, .. }
-        | Node::OpPowerKind { left, right }
-        | Node::CompareKind { left, right, .. } => {
-            has_time_or_random(left) || has_time_or_random(right)
-        }
-        Node::LambdaDefKind { body, .. } => has_time_or_random(body),
-        Node::LambdaCallKind { lambda, args } => {
-            has_time_or_random(lambda) || args.iter().any(has_time_or_random)
-        }
-        Node::NamedFunctionKind { args, .. } => args.iter().any(has_time_or_random),
-        Node::ImplicitIntersection { child, .. }
-        | Node::SpillRangeOperator { child }
-        | Node::UnaryKind { right: child, .. } => has_time_or_random(child),
-        _ => false,
-    }
-}
-
 fn is_volatile(kind: &Function) -> bool {
     matches!(
         kind,
@@ -181,22 +149,74 @@ fn collect(node: &Node, cell: Key, refs: &mut Vec<Ref>) -> bool {
     }
 }
 
+// A balanced immutable interval tree. Each node caches its subtree's maximum
+// endpoint, so queries skip spans that cannot contain the edited row.
+#[derive(Default)]
+struct IntervalIndex {
+    spans: Vec<IndexedSpan>,
+    maxima: Vec<i32>,
+}
+impl IntervalIndex {
+    fn push(&mut self, span: IndexedSpan) {
+        self.spans.push(span);
+    }
+    fn finish(&mut self) {
+        self.spans.sort_unstable();
+        self.maxima.resize(self.spans.len(), 0);
+        fn build(spans: &[IndexedSpan], maxima: &mut [i32]) -> i32 {
+            if spans.is_empty() {
+                return i32::MIN;
+            }
+            let mid = spans.len() / 2;
+            let (left, right) = maxima.split_at_mut(mid);
+            let max = spans[mid]
+                .1
+                .max(build(&spans[..mid], left))
+                .max(build(&spans[mid + 1..], &mut right[1..]));
+            right[0] = max;
+            max
+        }
+        build(&self.spans, &mut self.maxima);
+    }
+    fn containing(&self, row: i32, mut emit: impl FnMut(usize)) {
+        fn visit(spans: &[IndexedSpan], maxima: &[i32], row: i32, emit: &mut impl FnMut(usize)) {
+            if spans.is_empty() {
+                return;
+            }
+            let mid = spans.len() / 2;
+            if maxima[mid] < row || spans[0].0 > row {
+                return;
+            }
+            visit(&spans[..mid], &maxima[..mid], row, emit);
+            let (first, last, id) = spans[mid];
+            if first <= row && row <= last {
+                emit(id);
+            }
+            if first <= row {
+                visit(&spans[mid + 1..], &maxima[mid + 1..], row, emit);
+            }
+        }
+        visit(&self.spans, &self.maxima, row, &mut emit);
+    }
+}
+
 impl DependencyIndex {
-    fn dependents(&self, cell: Key, out: &mut Vec<Key>) {
+    fn dependents(&self, cell: Key, expanded: &mut HashSet<usize>, out: &mut Vec<Key>) {
         let (sheet, row, column) = cell;
         if let Some(deps) = self.by_cell.get(&cell) {
             out.extend(deps);
         }
-        if let Some(ranges) = self.by_column.get(&(sheet, column)) {
-            for &(first, last, id) in ranges {
-                if first <= row && row <= last {
-                    out.extend(&self.ranges[id]);
-                }
+        let mut emit = |id| {
+            if expanded.insert(id) {
+                out.extend(&self.ranges[id]);
             }
+        };
+        if let Some(ranges) = self.by_column.get(&(sheet, column)) {
+            ranges.containing(row, &mut emit);
         }
         for &((s, r1, c1, r2, c2), id) in &self.wide {
             if s == sheet && r1 <= row && row <= r2 && c1 <= column && column <= c2 {
-                out.extend(&self.ranges[id]);
+                emit(id);
             }
         }
     }
@@ -217,14 +237,15 @@ impl Model<'_> {
     }
 
     fn build_dependency_index(&mut self) {
+        #[cfg(test)]
+        {
+            self.evaluation.dependency_index_builds += 1;
+        }
         let mut index = DependencyIndex::default();
         let mut rectangles: HashMap<Rectangle, usize> = HashMap::new();
         for (sheet, worksheet) in self.workbook.worksheets.iter().enumerate() {
             for (row, column, cell) in worksheet.sheet_data.cells() {
-                index.has_arrays |= matches!(
-                    cell.as_ref(),
-                    Cell::ArrayFormula { .. } | Cell::SpillCell { .. }
-                );
+                index.has_arrays |= !scalar_calculation_cell(&cell);
                 let Some(formula) = cell.get_formula() else {
                     continue;
                 };
@@ -269,11 +290,16 @@ impl Model<'_> {
                 }
             }
         }
+        for spans in index.by_column.values_mut() {
+            spans.finish();
+        }
         self.dependency_index = Some(Arc::new(index));
     }
 
-    /// Recalculate after edits to cell values/formulas. Structural changes must
-    /// use full evaluate. `None` means a safe full recalculation was performed.
+    /// Recalculate after edits to cell values/formulas, supplying every edited
+    /// cell. Structural model APIs automatically invalidate the baseline.
+    /// Direct workbook mutations still require a full evaluation.
+    /// `None` means a safe full recalculation was performed.
     pub fn evaluate_incremental(&mut self, edited: &[(u32, i32, i32)]) -> Option<Vec<Key>> {
         let changed = self.evaluate_incremental_headless(edited);
         self.evaluate_conditional_formatting();
@@ -287,6 +313,8 @@ impl Model<'_> {
         edited: &[(u32, i32, i32)],
     ) -> Option<Vec<Key>> {
         if self.workbook.settings.iterative_calculation.enabled
+            || !self.evaluation.report.converged
+            || self.evaluation.scalar_only != Some(true)
             || self.evaluation.cells.is_empty()
             || !self.evaluation.circular.is_empty()
         {
@@ -317,12 +345,13 @@ impl Model<'_> {
         let mut queue: VecDeque<Key> = edited.iter().copied().collect();
         queue.extend(index.volatile.iter().copied());
         let mut next = Vec::new();
+        let mut expanded_ranges = HashSet::new();
         while let Some(cell) = queue.pop_front() {
             if !seen.insert(cell) {
                 continue;
             }
             next.clear();
-            index.dependents(cell, &mut next);
+            index.dependents(cell, &mut expanded_ranges, &mut next);
             queue.extend(next.iter().copied().filter(|d| !seen.contains(d)));
         }
         let mut dirty: Vec<_> = seen
@@ -345,6 +374,8 @@ impl Model<'_> {
         self.evaluation.unwinding = false;
         self.evaluation.in_pass = true;
         self.evaluation.recursion_limit_hit = false;
+        self.evaluation.recursion_failures.clear();
+        self.evaluation.spill_changed = false;
         self.evaluation.lambda_depth = 0;
         self.clear_variable_stack();
         self.clear_lambdas();
@@ -361,16 +392,12 @@ impl Model<'_> {
         let became_array = dirty.iter().any(|&(s, r, c)| {
             self.workbook.worksheets[s as usize]
                 .cell(r, c)
-                .is_some_and(|cell| {
-                    matches!(
-                        cell.as_ref(),
-                        Cell::ArrayFormula { .. } | Cell::SpillCell { .. }
-                    )
-                })
+                .is_some_and(|cell| !scalar_calculation_cell(&cell))
         });
         if self.evaluation.restart.is_some()
             || !self.evaluation.circular.is_empty()
             || became_array
+            || self.evaluation.spill_changed
             || self.evaluation.recursion_limit_hit
         {
             self.evaluate_headless();
@@ -385,5 +412,52 @@ impl Model<'_> {
         };
         self.dependency_index = Some(index);
         Some(dirty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interval_queries_match_linear_containment() {
+        let mut index = IntervalIndex::default();
+        for id in 0..2000 {
+            let start = (id * 193 % 4000) as i32;
+            index.push((start, start + (id % 19) as i32, id));
+        }
+        index.finish();
+        for row in [-1, 0, 1, 10, 999, 2000, 3999, 5000] {
+            let mut actual = Vec::new();
+            index.containing(row, |id| actual.push(id));
+            actual.sort_unstable();
+            let mut expected: Vec<_> = index
+                .spans
+                .iter()
+                .filter(|&&(a, b, _)| a <= row && row <= b)
+                .map(|&(_, _, id)| id)
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn rectangles_expand_once_across_columns_and_reads() {
+        let mut index = DependencyIndex::default();
+        index.ranges.push(vec![(0, 10, 10)]);
+        for col in [1, 2] {
+            let spans = index.by_column.entry((0, col)).or_default();
+            spans.push((1, 10, 0));
+            spans.finish();
+        }
+        let mut expanded = HashSet::new();
+        let mut out = Vec::new();
+        for row in 1..=10 {
+            for col in [1, 2] {
+                index.dependents((0, row, col), &mut expanded, &mut out);
+            }
+        }
+        assert_eq!(out, vec![(0, 10, 10)]);
     }
 }

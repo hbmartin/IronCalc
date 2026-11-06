@@ -49,7 +49,9 @@ fn randomized_edits_and_dynamic_targets_match_full_evaluation() {
                 .update_cell_with_number(0, row, 1, value as f64)
                 .unwrap();
         }
-        incremental.evaluate_incremental_headless(&[(0, row, 1)]);
+        assert!(incremental
+            .evaluate_incremental_headless(&[(0, row, 1)])
+            .is_some());
         full.evaluate_headless();
         assert_same(&incremental, &full);
     }
@@ -88,13 +90,13 @@ fn formula_replacement_and_new_formulas_rebuild_dependencies() {
     model._set("C1", "=B1+1");
     model.evaluate_headless();
     model._set("B1", "3");
-    model.evaluate_incremental_headless(&[(0, 1, 2)]);
+    assert!(model.evaluate_incremental_headless(&[(0, 1, 2)]).is_some());
     assert_eq!(model._get_text("C1"), "4");
     model._set("B1", "=A1*3");
-    model.evaluate_incremental_headless(&[(0, 1, 2)]);
+    assert!(model.evaluate_incremental_headless(&[(0, 1, 2)]).is_some());
     assert_eq!(model._get_text("C1"), "31");
     model._set("A1", "20");
-    model.evaluate_incremental_headless(&[(0, 1, 1)]);
+    assert!(model.evaluate_incremental_headless(&[(0, 1, 1)]).is_some());
     assert_eq!(model._get_text("C1"), "61");
 }
 

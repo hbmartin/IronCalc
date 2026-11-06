@@ -282,6 +282,10 @@ impl<'a> Model<'a> {
         evaluation.cells = self.evaluation.cells.clone();
         evaluation.report = self.evaluation.report.clone();
         evaluation.anchor_order = self.evaluation.anchor_order.clone();
+        evaluation.max_depth = self.evaluation.max_depth;
+        evaluation.max_stack = self.evaluation.max_stack;
+        evaluation.max_lambda_depth = self.evaluation.max_lambda_depth;
+        evaluation.scalar_only = self.evaluation.scalar_only;
         Ok(Model {
             workbook: self.workbook.clone(),
             parsed_formulas: self.parsed_formulas.clone(),
@@ -299,7 +303,7 @@ impl<'a> Model<'a> {
             evaluation,
             dependency_index: self.dependency_index.clone(),
             cf_cache: HashMap::new(),
-            links: HashMap::new(),
+            links: self.links.clone(),
         })
     }
 
@@ -1293,6 +1297,7 @@ impl<'a> Model<'a> {
         let CellReferenceIndex { sheet, row, column } = anchor;
         let height = array.len() as i32;
         let width = array[0].len() as i32;
+        self.evaluation.spill_changed |= (width, height) != (1, 1) || old_area != (width, height);
         let spill_error = |message: &str| {
             Some(CalcResult::new_error(
                 Error::SPILL,
@@ -3350,6 +3355,7 @@ impl<'a> Model<'a> {
     // * Delete the spilled cells
     // * Update the formula cell to be DynamicFormula with r = (1,1)
     pub(crate) fn reset_dynamic_array_spills(&mut self, sheet: u32) -> Result<(), String> {
+        self.invalidate_calculation();
         // Collect anchor info first — can't mutate sheet_data while iterating over it.
         let anchors: Vec<(i32, i32, i32, i32, i32, i32)> = {
             let ws = self.workbook.worksheet(sheet)?;
@@ -3921,14 +3927,31 @@ impl<'a> Model<'a> {
     ///
     /// With `enabled` set, the cells that take part in a circular reference are
     /// recalculated until the largest change of any cell between two recalculations
-    /// is smaller than `maximum_change`, or `maximum_iterations` recalculations have
-    /// run, whichever happens first. A cell that has no value yet counts as zero
+    /// is smaller than a positive `maximum_change` (exact equality when zero), or
+    /// `maximum_iterations` recalculations have run, whichever happens first.
+    /// Boolean values and numeric/Boolean types must match exactly.
+    /// A cell that has no value yet counts as zero
     /// the first time it is read, and a cell that is being calculated contributes the
     /// value it held after the previous recalculation. There is no error if the values
     /// do not settle within the limit; inspect `evaluation_report()` afterwards.
     ///
     /// With `enabled` unset, a circular reference evaluates to `#CIRC!`.
     pub fn set_iterative_calculation(
+        &mut self,
+        enabled: bool,
+        maximum_iterations: u32,
+        maximum_change: f64,
+    ) -> Result<(), String> {
+        self.set_iterative_calculation_without_evaluation(
+            enabled,
+            maximum_iterations,
+            maximum_change,
+        )?;
+        self.evaluate();
+        Ok(())
+    }
+
+    pub(crate) fn set_iterative_calculation_without_evaluation(
         &mut self,
         enabled: bool,
         maximum_iterations: u32,
@@ -3941,7 +3964,7 @@ impl<'a> Model<'a> {
         };
         settings.validate()?;
         self.workbook.settings.iterative_calculation = settings;
-        self.evaluate();
+        self.invalidate_calculation();
         Ok(())
     }
 

@@ -74,6 +74,7 @@ impl<'a> Model<'a> {
     // This function parses all the internal formulas in all the worksheets
     // (in the default language ("en") and locale ("en") and the RC format)
     pub(crate) fn parse_formulas(&mut self) {
+        self.invalidate_calculation();
         let locale = self.locale;
         let language = self.language;
 

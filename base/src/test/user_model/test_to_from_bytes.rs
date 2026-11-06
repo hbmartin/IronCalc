@@ -23,10 +23,10 @@ fn basic() {
 #[test]
 fn errors() {
     let model_bytes = "Early in the morning, late in the century, Cricklewood Broadway.".as_bytes();
-    assert_eq!(
-        &UserModel::from_bytes(model_bytes, "en").unwrap_err(),
-        "Error parsing workbook: invalid packing"
-    );
+    // bitcode deliberately omits decoder details in optimized builds.
+    assert!(UserModel::from_bytes(model_bytes, "en")
+        .unwrap_err()
+        .starts_with("Error parsing workbook: "));
 }
 
 #[test]
