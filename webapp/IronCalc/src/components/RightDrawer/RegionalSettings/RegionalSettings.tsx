@@ -6,13 +6,18 @@ import { Button } from "../../Button/Button";
 import { IconButton } from "../../Button/IconButton";
 import "./regional-settings.css";
 import { Select } from "../../Select/Select";
+import type { RegionalSettingsSaveResult } from "./saveRegionalSettings";
 
 type RegionalSettingsProps = {
   onClose: () => void;
   initialLocale: string;
   initialTimezone: string;
   initialLanguage: string;
-  onSave: (locale: string, timezone: string, language: string) => void;
+  onSave: (
+    locale: string,
+    timezone: string,
+    language: string,
+  ) => RegionalSettingsSaveResult;
 };
 
 // Display mapping for locale codes (e.g., "en" -> "en-US")
@@ -85,11 +90,13 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
   const [selectedLanguage, setSelectedLanguage] = useState(
     properties.initialLanguage,
   );
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedLocale(properties.initialLocale);
     setSelectedTimezone(properties.initialTimezone);
     setSelectedLanguage(properties.initialLanguage);
+    setSaveError(null);
   }, [
     properties.initialLocale,
     properties.initialTimezone,
@@ -97,8 +104,15 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
   ]);
 
   const handleSave = () => {
-    properties.onSave(selectedLocale, selectedTimezone, selectedLanguage);
-    properties.onClose();
+    const result = properties.onSave(
+      selectedLocale,
+      selectedTimezone,
+      selectedLanguage,
+    );
+    setSaveError(result.error);
+    if (result.error === null) {
+      properties.onClose();
+    }
   };
 
   return (
@@ -125,7 +139,10 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
             <Select
               label={t("regional_settings.locale.locale_label")}
               value={selectedLocale}
-              onChange={setSelectedLocale}
+              onChange={(value) => {
+                setSelectedLocale(value);
+                setSaveError(null);
+              }}
               options={locales.map((locale) => ({
                 value: locale,
                 label: getLocaleDisplayName(locale),
@@ -175,7 +192,10 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
               label={t("regional_settings.timezone.timezone_label")}
               helperText={t("regional_settings.timezone.timezone_helper")}
               value={selectedTimezone}
-              onChange={setSelectedTimezone}
+              onChange={(value) => {
+                setSelectedTimezone(value);
+                setSaveError(null);
+              }}
               options={timezones.map((timezone) => ({
                 value: timezone,
                 label: timezone,
@@ -187,6 +207,11 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
       </div>
 
       <div className="ic-regional-settings-footer">
+        {saveError !== null && (
+          <div className="ic-regional-settings-error" role="alert">
+            {saveError}
+          </div>
+        )}
         <Button startIcon={<Check />} onClick={handleSave}>
           {t("num_fmt.save")}
         </Button>

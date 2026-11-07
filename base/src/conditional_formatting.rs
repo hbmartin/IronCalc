@@ -140,8 +140,10 @@ impl<'a> Model<'a> {
     /// Formula references read stored values without calculating or modifying cells.
     pub fn evaluate_conditional_formatting(&mut self) {
         if self.evaluation.display.edit_depth > 0 {
+            self.evaluation.display.formatting_requested = true;
             return;
         }
+        self.evaluation.display.formatting_requested = false;
         #[cfg(test)]
         {
             self.evaluation.cf_evaluations += 1;

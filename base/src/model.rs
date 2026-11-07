@@ -3259,6 +3259,7 @@ impl<'a> Model<'a> {
             if !this.can_clear_range(range)? {
                 return Err("Cannot clear the range because it contains array formulas".to_string());
             }
+            this.invalidate_calculation();
             this.collapse_partially_cleared_spills(range)?;
             let sheet = range.sheet;
             let ws = this.workbook.worksheet_mut(sheet)?;
@@ -3364,6 +3365,7 @@ impl<'a> Model<'a> {
             if !this.can_clear_range(area)? {
                 return Err("Cannot clear the range because it contains array formulas".to_string());
             }
+            this.invalidate_calculation();
             this.collapse_partially_cleared_spills(area)?;
             let worksheet = this.workbook.worksheet_mut(area.sheet)?;
 

@@ -95,6 +95,10 @@ impl<'a> Model<'a> {
     /// * the range intersects an array formula
     /// * more than one cell of the range has content
     pub fn merge_cells(&mut self, range: &Area) -> Result<(), String> {
+        self.with_display_batch(|this| this.merge_cells_in_display_edit(range))
+    }
+
+    fn merge_cells_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let Area {
             sheet,
             row,
@@ -104,6 +108,7 @@ impl<'a> Model<'a> {
         } = *range;
         self.check_merge_range(range)?;
         let content_cell = self.merge_range_content_cell(range)?;
+        self.invalidate_calculation();
         // The merged cell takes the content and style of the single cell with
         // content; of the anchor if the whole range is empty.
         let (source_row, source_column) = content_cell.unwrap_or((row, column));
@@ -117,6 +122,7 @@ impl<'a> Model<'a> {
                 .worksheet(sheet)?
                 .cell(source_row, source_column)
                 .map(Cow::into_owned);
+            let retained = source_cell.clone();
             match source_cell {
                 Some(Cell::CellFormula { .. }) | Some(Cell::ArrayFormula { .. }) => {
                     // Formulas are stored relative to their cell: re-enter the
@@ -131,6 +137,14 @@ impl<'a> Model<'a> {
                         .update_cell(row, column, cell)?;
                 }
                 None => {}
+            }
+            if let Some(cell) = retained {
+                self.transfer_cell_display(
+                    sheet,
+                    (source_row, source_column),
+                    (row, column),
+                    &cell,
+                );
             }
             let worksheet = self.workbook.worksheet_mut(sheet)?;
             if let Some(link) = worksheet.links.remove(&(source_row, source_column)) {
@@ -164,6 +178,10 @@ impl<'a> Model<'a> {
     /// Same as [Model::merge_cells] but the merged cell is also centered
     /// horizontally ("merge & center").
     pub fn merge_cells_center(&mut self, range: &Area) -> Result<(), String> {
+        self.with_display_batch(|this| this.merge_cells_center_in_display_edit(range))
+    }
+
+    fn merge_cells_center_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         self.merge_cells(range)?;
         self.center_merged_range(range)
     }
@@ -173,6 +191,10 @@ impl<'a> Model<'a> {
     /// row. Every row is validated up front, so the operation is
     /// all-or-nothing: if any row cannot be merged nothing changes.
     pub fn merge_cells_across(&mut self, range: &Area) -> Result<(), String> {
+        self.with_display_batch(|this| this.merge_cells_across_in_display_edit(range))
+    }
+
+    fn merge_cells_across_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let ranges = merge_across_ranges(range)?;
         for range in &ranges {
             self.check_merge(range)?;
@@ -188,6 +210,10 @@ impl<'a> Model<'a> {
     /// column by column. Every column is validated up front, so the operation
     /// is all-or-nothing: if any column cannot be merged nothing changes.
     pub fn merge_cells_down(&mut self, range: &Area) -> Result<(), String> {
+        self.with_display_batch(|this| this.merge_cells_down_in_display_edit(range))
+    }
+
+    fn merge_cells_down_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let ranges = merge_down_ranges(range)?;
         for range in &ranges {
             self.check_merge(range)?;
@@ -362,6 +388,10 @@ impl<'a> Model<'a> {
     /// Removes every merged cell that intersects `range`. The content of the
     /// anchors is kept. Removing no merged cells at all is not an error.
     pub fn unmerge_cells(&mut self, range: &Area) -> Result<(), String> {
+        self.with_display_batch(|this| this.unmerge_cells_in_display_edit(range))
+    }
+
+    fn unmerge_cells_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let Area {
             sheet,
             row,
@@ -373,9 +403,13 @@ impl<'a> Model<'a> {
             return Err("Invalid range".to_string());
         }
         let worksheet = self.workbook.worksheet_mut(sheet)?;
+        let before = worksheet.merged_cells.len();
         worksheet
             .merged_cells
             .retain(|m| !m.intersects(row, column, width, height));
+        if worksheet.merged_cells.len() != before {
+            self.invalidate_calculation();
+        }
         Ok(())
     }
 

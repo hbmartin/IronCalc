@@ -69,6 +69,17 @@ jobs:
       - run: cargo +1.99.1 install --locked wasm-pack --version 0.15.1
       - run: make tests
         working-directory: bindings/wasm
+      - name: Build browser package for workbook tests
+        run: |
+          make types.js
+          wasm-pack build --dev --target web --scope ironcalc --out-dir pkg
+          python3 fix_types.py pkg
+          python3 fix_package.py pkg
+        working-directory: bindings/wasm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: webapp/IronCalc
+      - run: npm run typecheck && npm test && npm run build && npm run check
+        working-directory: webapp/IronCalc
 
   wasi:
     runs-on: ubuntu-latest

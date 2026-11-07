@@ -103,3 +103,11 @@
   padding: 8px;
   gap: 8px;
 }
+
+.ic-regional-settings-error {
+  flex: 1;
+  min-width: 0;
+  color: var(--palette-error-main);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

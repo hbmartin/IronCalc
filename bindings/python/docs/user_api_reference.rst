@@ -51,10 +51,15 @@ Collaboration
 .. method:: UserModel.flush_send_queue() -> bytes
 
    Returns (and clears) the queue of binary diffs produced by local edits.
+   Retain the bytes until the receiver applies them successfully: flushing is
+   not a delivery acknowledgement.
 
 .. method:: UserModel.apply_external_diffs(external_diffs: bytes)
 
    Applies a list of diffs produced by another model's ``flush_send_queue``.
+   A context-changing batch can be rejected while evaluation is paused or
+   iteration settings are invalid. Rejection applies nothing; retain and retry
+   the same bytes after resolving the cause, before sending later batches.
 
 Undo, redo and evaluation
 ^^^^^^^^^^^^^^^^^^^^^^^^^

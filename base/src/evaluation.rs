@@ -679,6 +679,7 @@ impl<'a> Model<'a> {
         self.evaluation.circular.clear();
         self.evaluation.scalar_only = None;
         self.evaluation.report = CalculationReport::default();
+        self.evaluation.display.formatting_requested = true;
     }
 
     /// Evaluates every formula in the workbook.
@@ -688,6 +689,7 @@ impl<'a> Model<'a> {
     pub fn evaluate(&mut self) {
         if self.evaluation.display.edit_depth > 0 {
             self.evaluation.display.calculation_requested = true;
+            self.evaluation.display.formatting_requested = true;
             return;
         }
         self.evaluate_headless();

@@ -15,10 +15,91 @@ use crate::{
 
 pub(crate) type Position = (u32, i32, i32);
 
+pub(crate) trait DisplayEditTarget<'a> {
+    fn edit_model(&mut self) -> &mut Model<'a>;
+}
+impl<'a> DisplayEditTarget<'a> for Model<'a> {
+    fn edit_model(&mut self) -> &mut Model<'a> {
+        self
+    }
+}
+impl<'a> DisplayEditTarget<'a> for crate::UserModel<'a> {
+    fn edit_model(&mut self) -> &mut Model<'a> {
+        &mut self.model
+    }
+}
+
+/// Owns the mutable borrow through final calculation and journal publication.
+/// Dropping an unfinished scope cleans up bookkeeping, never workbook values.
+#[must_use]
+pub(crate) struct DisplayEditGuard<'s, 'a, T: DisplayEditTarget<'a>> {
+    target: &'s mut T,
+    previous_depth: usize,
+    replay: bool,
+    armed: bool,
+    lifetime: std::marker::PhantomData<&'a ()>,
+}
+impl<'s, 'a, T: DisplayEditTarget<'a>> DisplayEditGuard<'s, 'a, T> {
+    pub(crate) fn new(target: &'s mut T, replay: bool) -> Self {
+        let model = target.edit_model();
+        let previous_depth = model.evaluation.display.edit_depth;
+        model.begin_display_edit();
+        if replay {
+            if let Some(journal) = &model.evaluation.display.journal {
+                journal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replay_depth += 1;
+            }
+        }
+        Self {
+            target,
+            previous_depth,
+            replay,
+            armed: true,
+            lifetime: std::marker::PhantomData,
+        }
+    }
+    pub(crate) fn target(&mut self) -> &mut T {
+        self.target
+    }
+    pub(crate) fn finish(&mut self, calculate: bool) {
+        self.end_replay();
+        self.target.edit_model().finish_display_edit(calculate);
+    }
+    pub(crate) fn cancel(&mut self) {
+        self.end_replay();
+        self.target.edit_model().cancel_display_edit();
+    }
+    fn end_replay(&mut self) {
+        if std::mem::take(&mut self.replay) {
+            if let Some(journal) = &self.target.edit_model().evaluation.display.journal {
+                journal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replay_depth -= 1;
+            }
+        }
+    }
+    pub(crate) fn complete(mut self) {
+        self.armed = false;
+    }
+}
+impl<'a, T: DisplayEditTarget<'a>> Drop for DisplayEditGuard<'_, 'a, T> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.target
+                .edit_model()
+                .abort_display_edit(self.previous_depth);
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct DisplayState {
     pub(crate) edit_depth: usize,
     pub(crate) calculation_requested: bool,
+    pub(crate) formatting_requested: bool,
     stored_reads: Arc<AtomicBool>,
     journal: Option<Arc<Mutex<MutationJournal>>>,
     #[cfg(test)]
@@ -45,6 +126,9 @@ pub(crate) enum CachedCell {
 pub(crate) struct MutationJournal {
     cells: HashMap<Position, Option<CachedCell>>,
     links: HashMap<Position, Option<Link>>,
+    replay_depth: usize,
+    replay_cells: HashSet<Position>,
+    replay_links: HashSet<Position>,
 }
 
 /// Cloning worksheet data never carries observation into the clone.
@@ -64,11 +148,14 @@ impl MutationObserver {
     }
     pub(crate) fn capture(&self, row: i32, column: i32, cell: Option<&Cell>) {
         if let Some(journal) = &self.journal {
-            journal
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            let position = (self.sheet_id, row, column);
+            if records.replay_depth > 0 {
+                records.replay_cells.insert(position);
+            }
+            records
                 .cells
-                .entry((self.sheet_id, row, column))
+                .entry(position)
                 .or_insert_with(|| cell.and_then(CachedCell::of));
         }
     }
@@ -169,6 +256,8 @@ impl Model<'_> {
             .enumerate()
             .map(|(index, ws)| (ws.sheet_id, index))
             .collect();
+        let replay_cells = std::mem::take(&mut records.replay_cells);
+        let replay_links = std::mem::take(&mut records.replay_links);
         let cells = records
             .cells
             .drain()
@@ -178,7 +267,9 @@ impl Model<'_> {
                     .and_then(|&i| self.workbook.worksheets[i].cell(p.1, p.2))
                     .as_deref()
                     .and_then(CachedCell::of);
-                (before != after).then_some((p, before, after))
+                (before != after
+                    || (replay_cells.contains(&p) && (before.is_some() || after.is_some())))
+                .then_some((p, before, after))
             })
             .collect();
         let links = records
@@ -189,7 +280,9 @@ impl Model<'_> {
                     .get(&p.0)
                     .and_then(|&i| self.links.get(&(i as u32, p.1, p.2)))
                     .cloned();
-                (before != after).then_some((p, before, after))
+                (before != after
+                    || (replay_links.contains(&p) && (before.is_some() || after.is_some())))
+                .then_some((p, before, after))
             })
             .collect();
         DisplayDelta { cells, links }
@@ -198,11 +291,14 @@ impl Model<'_> {
     fn record_dynamic_link(&self, position: (u32, i32, i32)) {
         if let Some(journal) = &self.evaluation.display.journal {
             if let Some(ws) = self.workbook.worksheets.get(position.0 as usize) {
-                journal
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+                let key = (ws.sheet_id, position.1, position.2);
+                if records.replay_depth > 0 {
+                    records.replay_links.insert(key);
+                }
+                records
                     .links
-                    .entry((ws.sheet_id, position.1, position.2))
+                    .entry(key)
                     .or_insert_with(|| self.links.get(&position).cloned());
             }
         }
@@ -234,6 +330,7 @@ impl Model<'_> {
         self.evaluation.display.edit_depth -= 1;
         if self.evaluation.display.edit_depth == 0 {
             self.evaluation.display.calculation_requested = false;
+            self.evaluation.display.formatting_requested = false;
         }
     }
 
@@ -270,10 +367,53 @@ impl Model<'_> {
             }
         }
         let requested = std::mem::take(&mut self.evaluation.display.calculation_requested);
+        let formatting = std::mem::take(&mut self.evaluation.display.formatting_requested);
         if calculate && requested {
             self.evaluate();
-        } else {
+        } else if formatting {
             self.evaluate_conditional_formatting();
+        }
+    }
+
+    pub(crate) fn abort_display_edit(&mut self, previous_depth: usize) {
+        self.evaluation.display.edit_depth = previous_depth;
+        self.evaluation.display.journal = None;
+        for ws in &mut self.workbook.worksheets {
+            ws.sheet_data.observe(MutationObserver::default());
+        }
+        self.invalidate_calculation();
+        self.evaluation.display.calculation_requested = false;
+        self.evaluation.display.formatting_requested = false;
+        self.evaluation.stack.clear();
+        self.evaluation.seen.clear();
+        self.evaluation.seen_ranges.clear();
+        self.evaluation.root = None;
+        self.evaluation.restart = None;
+        self.evaluation.in_pass = false;
+        self.evaluation.iterating = false;
+        self.evaluation.unwinding = false;
+        self.evaluation.depth = 0;
+        self.evaluation.lambda_depth = 0;
+    }
+
+    /// Transfer derived fields after re-entering a moved formula at its target.
+    pub(crate) fn transfer_cell_display(
+        &mut self,
+        sheet: u32,
+        source: (i32, i32),
+        target: (i32, i32),
+        cell: &Cell,
+    ) {
+        if let Some(cached) = CachedCell::of(cell) {
+            self.restore_cached_cell(sheet, target.0, target.1, &cached);
+        }
+        let old = (sheet, source.0, source.1);
+        let new = (sheet, target.0, target.1);
+        let link = self.links.get(&old).cloned();
+        self.remove_dynamic_link(&old);
+        self.remove_dynamic_link(&new);
+        if let Some(link) = link {
+            self.insert_dynamic_link(new, link);
         }
     }
 
@@ -406,12 +546,14 @@ impl Model<'_> {
     ) -> Result<T, String> {
         let before = self.display_snapshot();
         self.record_snapshot_links(&before);
-        self.begin_display_edit();
-        let result = edit(self);
+        let mut scope = DisplayEditGuard::new(self, true);
+        let result = edit(scope.target());
         if result.is_ok() {
-            self.restore_mapped_display(before, map);
+            scope.target().restore_mapped_display(before, map);
+            scope.target().evaluation.display.formatting_requested = true;
         }
-        self.finish_display_edit(result.is_ok());
+        scope.finish(result.is_ok());
+        scope.complete();
         result
     }
 
@@ -420,6 +562,22 @@ impl Model<'_> {
         before: DisplaySnapshot,
         map: impl Fn(Position) -> Option<Position>,
     ) {
+        // Cuts remap outside a structural scope: retain their replay positions too.
+        if let Some(journal) = &self.evaluation.display.journal {
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            for &p in before.cells.keys() {
+                records.replay_cells.insert(p);
+                if let Some(target) = map(p) {
+                    records.replay_cells.insert(target);
+                }
+            }
+            for &p in before.links.keys() {
+                records.replay_links.insert(p);
+                if let Some(target) = map(p) {
+                    records.replay_links.insert(target);
+                }
+            }
+        }
         let sheet_index = |model: &Self, id| {
             model
                 .workbook
@@ -612,9 +770,13 @@ impl Model<'_> {
         &mut self,
         edit: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.begin_display_edit();
-        let result = edit(self);
-        self.finish_display_edit(result.is_ok());
+        let mut scope = DisplayEditGuard::new(self, false);
+        let result = edit(scope.target());
+        if result.is_ok() {
+            scope.target().evaluation.display.formatting_requested = true;
+        }
+        scope.finish(result.is_ok());
+        scope.complete();
         result
     }
 }

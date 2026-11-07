@@ -9,25 +9,27 @@ impl UserModel<'_> {
     ) -> Result<T, String> {
         let outermost = self.model.evaluation.display.edit_depth == 0;
         let journaled = outermost && record;
+        let mut scope = crate::display::DisplayEditGuard::new(self, false);
         if journaled {
-            self.model.start_display_journal();
+            scope.target().model.start_display_journal();
         }
-        let entries = self.history.undo_stack.len();
-        self.model.begin_display_edit();
-        let result = edit(self);
+        let entries = scope.target().history.undo_stack.len();
+        let result = edit(scope.target());
         if result.is_ok() {
-            self.model.finish_display_edit(!self.pause_evaluation);
+            let calculate = !scope.target().pause_evaluation;
+            scope.finish(calculate);
         } else {
-            self.model.cancel_display_edit();
+            scope.cancel();
         }
         if journaled {
-            let difference = self.model.take_display_journal();
-            if self.history.undo_stack.len() > entries {
-                if let Some(entry) = self.history.undo_stack.last_mut() {
-                    entry.display = difference;
+            let difference = scope.target().model.take_display_journal();
+            if scope.target().history.undo_stack.len() > entries {
+                if let Some(entry) = scope.target().history.undo_stack.last_mut() {
+                    entry.display = std::sync::Arc::new(difference);
                 }
             }
         }
+        scope.complete();
         result
     }
 
@@ -263,7 +265,7 @@ impl UserModel<'_> {
             .iter_mut()
             .chain(&mut self.history.redo_stack)
         {
-            entry.display.discard_conflicts(&conflicts);
+            std::sync::Arc::make_mut(&mut entry.display).discard_conflicts(&conflicts);
         }
         result
     }
