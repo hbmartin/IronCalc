@@ -1770,6 +1770,9 @@ impl<'a> Model<'a> {
         delta: i32,
     ) -> Result<(), String> {
         let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        if column_count <= 0 || delta == 0 {
+            return Ok(());
+        }
         self.with_structural_display_edit(
             |p| {
                 crate::display::map_axis(
@@ -1874,6 +1877,9 @@ impl<'a> Model<'a> {
         delta: i32,
     ) -> Result<(), String> {
         let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        if row_count <= 0 || delta == 0 {
+            return Ok(());
+        }
         self.with_structural_display_edit(
             |p| {
                 crate::display::map_axis(

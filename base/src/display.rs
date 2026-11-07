@@ -1,6 +1,6 @@
 //! Retained calculation results and edit boundaries. None of this state is encoded.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -406,6 +406,9 @@ pub(crate) fn map_axis(
             }
         }
         AxisEdit::Move { count, delta } => {
+            if count <= 0 || delta == 0 {
+                return Some(p);
+            }
             if old >= start && old < start + count {
                 old + delta
             } else if delta > 0 && old >= start + count && old < start + count + delta {
@@ -495,5 +498,90 @@ impl Model<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// Explicit remote writes retire local derived state without changing wire history.
+#[derive(Default)]
+pub(crate) struct DisplayConflicts {
+    pub(crate) all: bool,
+    pub(crate) sheets: HashSet<u32>,
+    pub(crate) areas: Vec<(u32, i32, i32, i32, i32)>,
+}
+impl DisplayConflicts {
+    pub(crate) fn area(&mut self, model: &Model, area: &crate::expressions::types::Area) {
+        let Ok(ws) = model.workbook.worksheet(area.sheet) else {
+            return;
+        };
+        self.areas
+            .push((ws.sheet_id, area.row, area.column, area.height, area.width));
+        for row in area.row..area.row.saturating_add(area.height) {
+            for (column, cell) in ws.sheet_data.cells_in_row_between(
+                row,
+                area.column,
+                area.column.saturating_add(area.width - 1),
+            ) {
+                let (ar, ac) = match &*cell {
+                    Cell::SpillCell { a, .. } => *a,
+                    Cell::ArrayFormula { .. } => (row, column),
+                    _ => continue,
+                };
+                if let Some(Cell::ArrayFormula { r: (w, h), .. }) = ws.cell(ar, ac).as_deref() {
+                    self.areas.push((ws.sheet_id, ar, ac, *h, *w));
+                }
+            }
+        }
+    }
+    fn contains(&self, p: Position) -> bool {
+        self.all
+            || self.sheets.contains(&p.0)
+            || self.areas.iter().any(|&(s, r, c, h, w)| {
+                p.0 == s
+                    && p.1 >= r
+                    && p.1 < r.saturating_add(h)
+                    && p.2 >= c
+                    && p.2 < c.saturating_add(w)
+            })
+    }
+}
+impl DisplayDelta {
+    pub(crate) fn discard_conflicts(&mut self, conflicts: &DisplayConflicts) {
+        let mut owners = HashSet::new();
+        for (p, before, after) in &self.cells {
+            for value in [before, after].into_iter().flatten() {
+                match value {
+                    CachedCell::Spill(Cell::SpillCell { a, .. }) if conflicts.contains(*p) => {
+                        owners.insert((p.0, a.0, a.1));
+                    }
+                    CachedCell::Formula(_, Some((_, (w, h))))
+                        if conflicts.areas.iter().any(|&(s, r, c, ah, aw)| {
+                            s == p.0
+                                && p.1 < r.saturating_add(ah)
+                                && p.1.saturating_add(*h) > r
+                                && p.2 < c.saturating_add(aw)
+                                && p.2.saturating_add(*w) > c
+                        }) =>
+                    {
+                        owners.insert(*p);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.cells.retain(|(position, before, after)| {
+            if conflicts.contains(*position) || owners.contains(position) {
+                return false;
+            }
+            ![before, after].into_iter().flatten().any(|value| {
+                if let CachedCell::Spill(Cell::SpillCell { a, .. }) = value {
+                    let owner = (position.0, a.0, a.1);
+                    owners.contains(&owner) || conflicts.contains(owner)
+                } else {
+                    false
+                }
+            })
+        });
+        self.links
+            .retain(|(p, _, _)| !conflicts.contains(*p) && !owners.contains(p));
     }
 }

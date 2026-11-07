@@ -441,10 +441,15 @@ impl<'a> UserModel<'a> {
         if let Ok(queue_diffs_list) = bitcode::decode::<Vec<QueueDiffs>>(diff_list_str) {
             self.preflight_context_queue(&queue_diffs_list)?;
             for queue_diff in queue_diffs_list {
-                if matches!(queue_diff.r#type, DiffType::Redo) {
-                    self.apply_diff_list(&queue_diff.list)?;
+                let undo = matches!(queue_diff.r#type, DiffType::Undo);
+                if undo {
+                    for diff in queue_diff.list.iter().rev() {
+                        self.apply_external_display_diff(diff, true)?;
+                    }
                 } else {
-                    self.apply_undo_diff_list(&queue_diff.list)?;
+                    for diff in &queue_diff.list {
+                        self.apply_external_display_diff(diff, false)?;
+                    }
                 }
             }
         } else {
@@ -1409,6 +1414,9 @@ impl<'a> UserModel<'a> {
         column_count: i32,
         delta: i32,
     ) -> Result<(), String> {
+        if column_count <= 0 || delta == 0 {
+            return Ok(());
+        }
         self.with_user_display_edit(true, |this| {
             this.move_columns_action_in_display_edit(sheet, column, column_count, delta)
         })
@@ -1465,6 +1473,9 @@ impl<'a> UserModel<'a> {
         row_count: i32,
         delta: i32,
     ) -> Result<(), String> {
+        if row_count <= 0 || delta == 0 {
+            return Ok(());
+        }
         self.with_user_display_edit(true, |this| {
             this.move_rows_action_in_display_edit(sheet, row, row_count, delta)
         })

@@ -10,7 +10,8 @@ use csv::{ReaderBuilder, WriterBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    cf_types::ConditionalFormatting,
+    cf_types::{CfRule, ConditionalFormatting},
+    constants::{LAST_COLUMN, LAST_ROW},
     expressions::types::{Area, CellReferenceIndex},
     model::CellStructure,
     types::{ArrayKind, Cell, Link, MergedCell, Style},
@@ -46,6 +47,18 @@ pub struct Clipboard {
     pub(crate) range: (i32, i32, i32, i32),
 }
 
+type FormulaUpdate = (u32, i32, i32, String);
+type NameUpdate = (String, Option<u32>, String, String);
+type FormattingUpdate = (u32, usize, String, CfRule);
+
+/// Only validated input reaches the mutating phase. No formulas run in planning.
+struct ClipboardPastePlan {
+    values: HashMap<(i32, i32), String>,
+    formula_updates: Vec<FormulaUpdate>,
+    name_updates: Vec<NameUpdate>,
+    formatting_updates: Vec<FormattingUpdate>,
+}
+
 impl<'a> UserModel<'a> {
     // Applies the merge containment rule to a paste into `target_area`
     // (whose top-left cell is the paste anchor). The paste footprint is the
@@ -62,12 +75,11 @@ impl<'a> UserModel<'a> {
     // * a single-cell paste into the anchor of a merged cell keeps the
     //   merge (only the anchor is written);
     // * any other overlap rejects the paste, before anything changed.
-    fn remove_merges_replaced_by_paste(
-        &mut self,
+    fn plan_merges_replaced_by_paste(
+        &self,
         target_area: &Area,
         pasted_merges: &[MergedCell],
-        diff_list: &mut Vec<Diff>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<Vec<MergedCell>>, String> {
         let sheet = target_area.sheet;
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
         let single_cell_target = target_area.width == 1 && target_area.height == 1;
@@ -119,13 +131,22 @@ impl<'a> UserModel<'a> {
                 return Err(PARTIAL_MERGE_PASTE_ERROR.to_string());
             }
         }
-        if removed_any {
-            self.model.workbook.worksheet_mut(sheet)?.merged_cells =
-                merged_cells_after_removal.clone();
+        Ok(removed_any.then_some(merged_cells_after_removal))
+    }
+
+    fn remove_merges_replaced_by_paste(
+        &mut self,
+        target_area: &Area,
+        pasted_merges: &[MergedCell],
+        diff_list: &mut Vec<Diff>,
+    ) -> Result<(), String> {
+        if let Some(new_value) = self.plan_merges_replaced_by_paste(target_area, pasted_merges)? {
+            let ws = self.model.workbook.worksheet_mut(target_area.sheet)?;
+            let old_value = std::mem::replace(&mut ws.merged_cells, new_value.clone());
             diff_list.push(Diff::SetMergedCells {
-                sheet,
-                old_value: old_merged_cells,
-                new_value: merged_cells_after_removal,
+                sheet: target_area.sheet,
+                old_value,
+                new_value,
             });
         }
         Ok(())
@@ -192,8 +213,159 @@ impl<'a> UserModel<'a> {
         clipboard: &ClipboardData,
         is_cut: bool,
     ) -> Result<(), String> {
+        let plan = self.plan_clipboard_paste(source_sheet, source_range, clipboard, is_cut)?;
         self.with_user_display_edit(true, |this| {
-            this.paste_from_clipboard_in_display_edit(source_sheet, source_range, clipboard, is_cut)
+            this.paste_from_clipboard_in_display_edit(
+                source_sheet,
+                source_range,
+                clipboard,
+                is_cut,
+                plan,
+            )
+        })
+    }
+
+    fn plan_clipboard_paste(
+        &mut self,
+        source_sheet: u32,
+        source_range: ClipboardTuple,
+        clipboard: &ClipboardData,
+        is_cut: bool,
+    ) -> Result<ClipboardPastePlan, String> {
+        let (r1, c1, r2, c2) = source_range;
+        let view = self.get_selected_view();
+        let source = Area {
+            sheet: source_sheet,
+            row: r1,
+            column: c1,
+            width: c2.saturating_sub(c1).saturating_add(1),
+            height: r2.saturating_sub(r1).saturating_add(1),
+        };
+        let target = Area {
+            sheet: view.sheet,
+            row: view.row,
+            column: view.column,
+            width: source.width,
+            height: source.height,
+        };
+        for area in [&source, &target] {
+            self.model.workbook.worksheet(area.sheet)?;
+            if area.width <= 0
+                || area.height <= 0
+                || area.row < 1
+                || area.column < 1
+                || i64::from(area.row) + i64::from(area.height) - 1 > i64::from(LAST_ROW)
+                || i64::from(area.column) + i64::from(area.width) - 1 > i64::from(LAST_COLUMN)
+            {
+                return Err("Clipboard range out of boundaries".into());
+            }
+        }
+        if !self.model.can_clear_range(&target)?
+            || (is_cut && !self.model.can_clear_range(&source)?)
+        {
+            return Err("Cannot clear the range because it contains array formulas".into());
+        }
+        let merges: Vec<_> = self
+            .model
+            .get_merged_cells(source_sheet)?
+            .iter()
+            .filter(|m| m.intersects(r1, c1, source.width, source.height))
+            .map(|m| MergedCell {
+                row: m.row + target.row - r1,
+                column: m.column + target.column - c1,
+                width: m.width,
+                height: m.height,
+            })
+            .collect();
+        self.plan_merges_replaced_by_paste(&target, &merges)?;
+        let mut values = HashMap::new();
+        for (&row, data) in clipboard {
+            for (&column, cell) in data {
+                if row < r1 || row > r2 || column < c1 || column > c2 {
+                    return Err("Source is outside the area".into());
+                }
+                let target_row = target.row + row - r1;
+                let target_column = target.column + column - c1;
+                self.model
+                    .get_style_for_cell(target.sheet, target_row, target_column)?;
+                self.model.get_style_for_cell(source_sheet, row, column)?;
+                if cell.is_spill {
+                    continue;
+                }
+                if !cell.text.starts_with('\'')
+                    && self.model.formula_without_prefix(&cell.text).is_none()
+                {
+                    let mut currencies = vec!["$", "€"];
+                    let currency = &self.model.locale.currency.symbol;
+                    if !currencies.contains(&currency.as_str()) {
+                        currencies.push(currency);
+                    }
+                    if let Ok((number, _)) = crate::formatter::format::parse_formatted_number(
+                        &cell.text,
+                        &currencies,
+                        self.model.locale,
+                    ) {
+                        if !number.is_finite() {
+                            return Err(format!("A cell cannot hold the number {number}"));
+                        }
+                    }
+                }
+                let from = CellReferenceIndex {
+                    sheet: source_sheet,
+                    row,
+                    column,
+                };
+                let to = CellReferenceIndex {
+                    sheet: target.sheet,
+                    row: target.row + row - r1,
+                    column: target.column + column - c1,
+                };
+                let value = if is_cut {
+                    self.model
+                        .move_cell_value_to_area(&cell.text, &from, &to, &source)?
+                } else {
+                    self.model.extend_copied_value(&cell.text, &from, &to)?
+                };
+                values.insert((row, column), value);
+            }
+        }
+        let (formula_updates, name_updates, formatting_updates) = if is_cut {
+            let updates = self
+                .model
+                .get_external_formula_updates_for_cut(&source, target.row, target.column)?
+                .into_iter()
+                .filter(|&(s, r, c, _)| {
+                    !(s == target.sheet
+                        && r >= target.row
+                        && r < target.row + target.height
+                        && c >= target.column
+                        && c < target.column + target.width)
+                })
+                .collect();
+            let names =
+                self.model
+                    .get_defined_name_updates_for_cut(&source, target.row, target.column);
+            for (name, _, _, formula) in &names {
+                if !crate::expressions::utils::is_valid_identifier(name) {
+                    return Err("Name: Invalid defined name".into());
+                }
+                let context = self.model.defined_name_context();
+                self.model.user_formula_to_internal(formula, &context)?;
+            }
+            let formatting = self.model.get_conditional_formatting_updates_for_cut(
+                &source,
+                target.row,
+                target.column,
+            )?;
+            (updates, names, formatting)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        Ok(ClipboardPastePlan {
+            values,
+            formula_updates,
+            name_updates,
+            formatting_updates,
         })
     }
 
@@ -203,6 +375,7 @@ impl<'a> UserModel<'a> {
         source_range: ClipboardTuple,
         clipboard: &ClipboardData,
         is_cut: bool,
+        mut plan: ClipboardPastePlan,
     ) -> Result<(), String> {
         let retained_cut = is_cut.then(|| self.model.display_snapshot());
         let source_id = self.model.workbook.worksheet(source_sheet)?.sheet_id;
@@ -221,13 +394,6 @@ impl<'a> UserModel<'a> {
         let (selected_row, selected_column) = (view.row, view.column);
         let mut max_row = selected_row;
         let mut max_column = selected_column;
-        let area = &Area {
-            sheet,
-            row: source_first_row,
-            column: source_first_column,
-            width: source_last_column - source_first_column + 1,
-            height: source_last_row - source_first_row + 1,
-        };
         let target_area = &Area {
             sheet,
             row: selected_row,
@@ -300,24 +466,11 @@ impl<'a> UserModel<'a> {
                 // (source_row, source_column) to (target_row , target_column)
                 // References in formulas are displaced
 
-                // remain in the copied area
-                let source = &CellReferenceIndex {
-                    sheet,
-                    column: *source_column,
-                    row: *source_row,
-                };
-                let target = &CellReferenceIndex {
-                    sheet,
-                    column: target_column,
-                    row: target_row,
-                };
-                let new_value = if is_cut {
-                    self.model
-                        .move_cell_value_to_area(&value.text, source, target, area)?
-                } else {
-                    self.model
-                        .extend_copied_value(&value.text, source, target)?
-                };
+                // Prepared before the edit scope, including all formula rewrites.
+                let new_value = plan
+                    .values
+                    .remove(&(*source_row, *source_column))
+                    .ok_or_else(|| "Missing prepared clipboard cell".to_string())?;
 
                 let old_value = self
                     .model
@@ -453,6 +606,13 @@ impl<'a> UserModel<'a> {
                     });
                 }
             }
+            self.model.collapse_partially_cleared_spills(&Area {
+                sheet: source_sheet,
+                row: source_first_row,
+                column: source_first_column,
+                width: source_last_column - source_first_column + 1,
+                height: source_last_row - source_first_row + 1,
+            })?;
             for row in source_first_row..=source_last_row {
                 for column in source_first_column..=source_last_column {
                     if (source_sheet == sheet) && seen_cells.contains(&(row, column)) {
@@ -510,14 +670,10 @@ impl<'a> UserModel<'a> {
                             }
                         }
                     } else {
-                        let area = Area {
-                            sheet: source_sheet,
-                            row,
-                            column,
-                            width: 1,
-                            height: 1,
-                        };
-                        self.model.range_clear_contents(&area)?;
+                        self.model
+                            .workbook
+                            .worksheet_mut(source_sheet)?
+                            .cell_clear_contents(row, column)?;
                     }
                     let old_style = self
                         .model
@@ -536,19 +692,7 @@ impl<'a> UserModel<'a> {
             }
             // Update external formulas that reference cells in the moved area.
             // source_sheet is used here (not `sheet`) so cross-sheet paste works.
-            let ext_area = Area {
-                sheet: source_sheet,
-                row: source_first_row,
-                column: source_first_column,
-                width: source_last_column - source_first_column + 1,
-                height: source_last_row - source_first_row + 1,
-            };
-            let ext_updates = self.model.get_external_formula_updates_for_cut(
-                &ext_area,
-                selected_row,
-                selected_column,
-            )?;
-            for (ext_sheet, ext_row, ext_col, new_formula) in ext_updates {
+            for (ext_sheet, ext_row, ext_col, new_formula) in plan.formula_updates {
                 let old_cell = self
                     .model
                     .workbook
@@ -566,12 +710,7 @@ impl<'a> UserModel<'a> {
                 });
             }
             // Update defined names whose references land inside the moved area.
-            let dn_updates = self.model.get_defined_name_updates_for_cut(
-                &ext_area,
-                selected_row,
-                selected_column,
-            );
-            for (dn_name, dn_scope, old_formula, new_formula) in dn_updates {
+            for (dn_name, dn_scope, old_formula, new_formula) in plan.name_updates {
                 diff_list.push(Diff::UpdateDefinedName {
                     name: dn_name.clone(),
                     scope: dn_scope,
@@ -589,12 +728,7 @@ impl<'a> UserModel<'a> {
                 )?;
             }
             // Update conditional formatting ranges and formula references.
-            let cf_updates = self.model.get_conditional_formatting_updates_for_cut(
-                &ext_area,
-                selected_row,
-                selected_column,
-            )?;
-            for (cf_sheet, cf_idx, new_range, new_rule) in cf_updates {
+            for (cf_sheet, cf_idx, new_range, new_rule) in plan.formatting_updates {
                 let old_cf = self
                     .model
                     .workbook
@@ -722,9 +856,9 @@ impl<'a> UserModel<'a> {
                 }
             });
         }
-        self.push_diff_list(diff_list);
-        // select the pasted area
+        // Selection is validated by the prepared footprint; publish history last.
         self.set_selected_range(selected_row, selected_column, max_row, max_column)?;
+        self.push_diff_list(diff_list);
         self.evaluate_if_not_paused();
         Ok(())
     }
