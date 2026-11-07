@@ -40,7 +40,7 @@
 //! amount of work does.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::calc_result::CalcResult;
 use crate::constants::{LAST_COLUMN, LAST_ROW};
@@ -460,6 +460,9 @@ pub(crate) struct Evaluation {
     pub(crate) loop_met: bool,
     pub(crate) iterative_cells: HashSet<CellKey>,
     pub(crate) report: CalculationReport,
+    pub(crate) require_two_iterative_passes: bool,
+    /// Shared only with scoped guards, never with another model or session.
+    pub(crate) calculation_time: Arc<Mutex<Option<i64>>>,
     pub(crate) lambda_depth: usize,
     pub(crate) max_lambda_depth: usize,
     pub(crate) recursion_limit_hit: bool,
@@ -468,13 +471,26 @@ pub(crate) struct Evaluation {
     pub(crate) scalar_only: Option<bool>,
     pub(crate) spill_changed: bool,
     pub(crate) runtime_reads: HashMap<CellKey, HashSet<CellKey>>,
-    pub(crate) time_or_random: HashSet<CellKey>,
+    pub(crate) random_cells: HashSet<CellKey>,
     #[cfg(test)]
     pub(crate) full_evaluations: usize,
     #[cfg(test)]
     pub(crate) dependency_index_builds: usize,
     #[cfg(test)]
     pub(crate) cycle_snapshot_cells: usize,
+}
+
+/// An owned guard lets evaluation borrow the model mutably while ensuring that
+/// the outermost calculation releases its timestamp, including during unwinding.
+pub(crate) struct CalculationTimeGuard(Arc<Mutex<Option<i64>>>);
+
+impl Drop for CalculationTimeGuard {
+    fn drop(&mut self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }
 
 /// How deep the recursion may go when nobody has said otherwise, in formulas
@@ -529,6 +545,8 @@ impl Default for Evaluation {
             loop_met: false,
             iterative_cells: HashSet::new(),
             report: CalculationReport::default(),
+            require_two_iterative_passes: true,
+            calculation_time: Arc::new(Mutex::new(None)),
             lambda_depth: 0,
             max_lambda_depth: 256,
             recursion_limit_hit: false,
@@ -536,7 +554,7 @@ impl Default for Evaluation {
             scalar_only: None,
             spill_changed: false,
             runtime_reads: HashMap::new(),
-            time_or_random: HashSet::new(),
+            random_cells: HashSet::new(),
             #[cfg(test)]
             full_evaluations: 0,
             #[cfg(test)]
@@ -568,6 +586,48 @@ impl Evaluation {
 }
 
 impl<'a> Model<'a> {
+    /// Start a clock scope only for the outermost calculation. Nested full
+    /// fallback and UI evaluation reuse its instant without owning its cleanup.
+    pub(crate) fn start_calculation_clock(&self) -> Option<CalculationTimeGuard> {
+        let mut timestamp = self
+            .evaluation
+            .calculation_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if timestamp.is_some() {
+            return None;
+        }
+        *timestamp = Some(crate::model::get_milliseconds_since_epoch());
+        Some(CalculationTimeGuard(Arc::clone(
+            &self.evaluation.calculation_time,
+        )))
+    }
+
+    pub(crate) fn calculation_timestamp_ms(&self) -> i64 {
+        self.evaluation
+            .calculation_time
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(crate::model::get_milliseconds_since_epoch)
+    }
+
+    /// Require a preceding completed pass before a circular calculation can
+    /// converge (default true). False restores first-pass comparison with zero.
+    /// The tolerance still measures successive changes, not mathematical stability.
+    /// This runtime option is inherited by forks, but is not saved in workbooks.
+    /// A change invalidates the report without evaluating; an unchanged value is a no-op.
+    pub fn set_require_two_iterative_passes(&mut self, required: bool) {
+        if self.evaluation.require_two_iterative_passes != required {
+            self.evaluation.require_two_iterative_passes = required;
+            self.invalidate_calculation();
+        }
+    }
+
+    /// Whether circular calculations require two completed passes (default true).
+    pub fn get_require_two_iterative_passes(&self) -> bool {
+        self.evaluation.require_two_iterative_passes
+    }
+
     /// Invalidate caches before a structural mutation, including mutations
     /// that could fail partway through. Resource limits remain unchanged.
     pub(crate) fn invalidate_calculation(&mut self) {
@@ -585,12 +645,14 @@ impl<'a> Model<'a> {
     /// A circular reference evaluates to `#CIRC!`, unless iterative calculation is
     /// enabled in the workbook settings, see [`Model::set_iterative_calculation`].
     pub fn evaluate(&mut self) {
+        let _clock = self.start_calculation_clock();
         self.evaluate_headless();
         self.evaluate_conditional_formatting();
     }
 
     /// Calculates without rebuilding conditional-formatting/UI caches.
     pub fn evaluate_headless(&mut self) {
+        let _clock = self.start_calculation_clock();
         #[cfg(test)]
         {
             self.evaluation.full_evaluations += 1;
@@ -644,6 +706,8 @@ impl<'a> Model<'a> {
     /// `maximum_change` (exact numeric equality when zero); Boolean values and
     /// types must match exactly. The calculation report distinguishes convergence
     /// from exhausting `maximum_iterations`. A workbook without loops needs one pass.
+    /// Cycles require a preceding completed pass by default; the runtime option
+    /// `set_require_two_iterative_passes(false)` restores zero-seed comparison.
     fn evaluate_iteratively(&mut self, settings: &IterativeCalculation) {
         self.forget_formula_values();
         self.evaluation.iterating = true;
@@ -672,7 +736,7 @@ impl<'a> Model<'a> {
                 self.evaluation.report.failure = None;
                 break;
             }
-            if self.cycle_reads_time_or_random() {
+            if self.cycle_reads_random() {
                 self.evaluation.report.failure = Some(CalculationFailure::VolatileCycle);
                 break;
             }
@@ -746,7 +810,10 @@ impl<'a> Model<'a> {
                 break;
             }
             previous = current;
-            if exact_stable && (change == 0.0 || change < settings.maximum_change) {
+            if (!self.evaluation.require_two_iterative_passes || iteration > 1)
+                && exact_stable
+                && (change == 0.0 || change < settings.maximum_change)
+            {
                 self.evaluation.report.converged = true;
                 self.evaluation.report.failure = None;
                 break;
@@ -823,14 +890,14 @@ impl<'a> Model<'a> {
         }
     }
 
-    fn cycle_reads_time_or_random(&self) -> bool {
+    fn cycle_reads_random(&self) -> bool {
         let mut pending: Vec<_> = self.evaluation.iterative_cells.iter().copied().collect();
         let mut seen = HashSet::new();
         while let Some(cell) = pending.pop() {
             if !seen.insert(cell) {
                 continue;
             }
-            if self.evaluation.time_or_random.contains(&cell) {
+            if self.evaluation.random_cells.contains(&cell) {
                 return true;
             }
             if let Some(reads) = self.evaluation.runtime_reads.get(&cell) {
@@ -842,6 +909,8 @@ impl<'a> Model<'a> {
 
     /// Maximum simultaneously active LAMBDA calls (default 256, minimum 1).
     /// The evaluation stack-byte budget can stop a call before this limit.
+    /// Deeper recursion requires explicitly sizing the hosting thread's stack
+    /// and its evaluation budget; increasing this limit alone is insufficient.
     pub fn set_max_lambda_depth(&mut self, depth: usize) {
         self.evaluation.max_lambda_depth = depth.max(1);
     }
@@ -872,11 +941,18 @@ impl<'a> Model<'a> {
             }
             state.recursion_failures.insert(key(cell));
             state.recursion_limit_hit = true;
-            return Err(CalcResult::new_error(
-                Error::NUM,
-                cell,
-                "LAMBDA recursion limit reached".into(),
-            ));
+            let message = if state.lambda_depth >= state.max_lambda_depth {
+                format!(
+                    "Configured LAMBDA call-depth limit ({}) reached",
+                    state.max_lambda_depth
+                )
+            } else {
+                format!(
+                    "Configured evaluation stack budget ({} bytes) exceeded",
+                    state.max_stack
+                )
+            };
+            return Err(CalcResult::new_error(Error::NUM, cell, message));
         }
         Ok(())
     }
@@ -1038,7 +1114,7 @@ impl<'a> Model<'a> {
         state.recursion_failures.clear();
         state.recursion_limit_hit = false;
         state.runtime_reads.clear();
-        state.time_or_random.clear();
+        state.random_cells.clear();
         state.spill_changed = false;
         if state.iterating {
             state.iterative_cells.clear();
@@ -1307,7 +1383,7 @@ impl<'a> Model<'a> {
         self.evaluation.recursion_limit_hit = !self.evaluation.recursion_failures.is_empty();
         if self.evaluation.iterating {
             self.evaluation.runtime_reads.remove(&key);
-            self.evaluation.time_or_random.remove(&key);
+            self.evaluation.random_cells.remove(&key);
         }
         // A formula can attach a link to its cell as it runs (HYPERLINK). A
         // run that was abandoned to an unwind may have attached one on the

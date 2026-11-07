@@ -2264,6 +2264,21 @@ impl<'a> UserModel<'a> {
         Ok(())
     }
 
+    /// Require two completed passes for circular convergence (default true).
+    /// This local runtime option is not saved, sent as a diff, or added to history.
+    /// A change evaluates once unless evaluation is paused; the same value is a no-op.
+    pub fn set_require_two_iterative_passes(&mut self, required: bool) {
+        if self.model.get_require_two_iterative_passes() != required {
+            self.model.set_require_two_iterative_passes(required);
+            self.evaluate_if_not_paused();
+        }
+    }
+
+    /// Whether circular convergence requires two completed passes (default true).
+    pub fn get_require_two_iterative_passes(&self) -> bool {
+        self.model.get_require_two_iterative_passes()
+    }
+
     /// Gets the iterative calculation settings of the workbook
     pub fn get_iterative_calculation(&self) -> IterativeCalculation {
         self.model.get_iterative_calculation()

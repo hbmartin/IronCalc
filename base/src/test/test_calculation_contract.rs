@@ -304,8 +304,6 @@ fn unrelated_and_inactive_volatility_does_not_block_cycles() {
 fn volatility_reaches_cycles_through_actual_dependencies() {
     for source in [
         "=RAND()",
-        "=TODAY()",
-        "=NOW()",
         "=RANDBETWEEN(1,9)",
         "=RANDARRAY(1)",
         "=SAMPLE(1)",

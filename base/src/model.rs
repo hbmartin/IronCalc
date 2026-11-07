@@ -285,6 +285,7 @@ impl<'a> Model<'a> {
         evaluation.max_depth = self.evaluation.max_depth;
         evaluation.max_stack = self.evaluation.max_stack;
         evaluation.max_lambda_depth = self.evaluation.max_lambda_depth;
+        evaluation.require_two_iterative_passes = self.evaluation.require_two_iterative_passes;
         evaluation.scalar_only = self.evaluation.scalar_only;
         Ok(Model {
             workbook: self.workbook.clone(),

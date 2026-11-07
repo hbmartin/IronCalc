@@ -1325,7 +1325,7 @@ impl<'a> Model<'a> {
             }
             None => &self.tz,
         };
-        match crate::tz::excel_serial_for_now(tz) {
+        match crate::tz::excel_serial_for_timestamp(tz, self.calculation_timestamp_ms()) {
             Some(serial) => CalcResult::Number(serial.floor()),
             None => CalcResult::Error {
                 error: Error::ERROR,
@@ -1365,7 +1365,7 @@ impl<'a> Model<'a> {
             }
             None => &self.tz,
         };
-        match crate::tz::excel_serial_for_now(tz) {
+        match crate::tz::excel_serial_for_timestamp(tz, self.calculation_timestamp_ms()) {
             Some(serial) => CalcResult::Number(serial),
             None => CalcResult::Error {
                 error: Error::ERROR,

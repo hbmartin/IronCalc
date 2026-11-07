@@ -1,4 +1,5 @@
 import test from 'ava'
+import { readFileSync } from 'node:fs';
 
 import {
   UserModel,
@@ -10,6 +11,26 @@ import {
   getAllTimezones,
   getSupportedLocales,
 } from '../index.js';
+
+for (const Constructor of [Model, UserModel]) {
+  test(`${Constructor.name} two-pass option is local runtime configuration`, (t) => {
+    const model = new Constructor('comparison');
+    t.true(model.getRequireTwoIterativePasses());
+    model.setRequireTwoIterativePasses(false);
+    t.false(model.getRequireTwoIterativePasses());
+    const restored = Constructor.fromBytes(model.toBytes());
+    t.true(restored.getRequireTwoIterativePasses());
+    model.setRequireTwoIterativePasses(true);
+    t.true(model.getRequireTwoIterativePasses());
+    if (Constructor === UserModel) t.false(model.canUndo());
+  });
+}
+
+test('generated declarations expose the option on both models', (t) => {
+  const declarations = readFileSync(new URL('../index.d.ts', import.meta.url), 'utf8');
+  t.is((declarations.match(/setRequireTwoIterativePasses\(required: boolean\): void/g) || []).length, 2);
+  t.is((declarations.match(/getRequireTwoIterativePasses\(\): boolean/g) || []).length, 2);
+});
 
 test('User Model smoke test', (t) => {
   const model = new UserModel("Workbook1", "en", "UTC", "en");

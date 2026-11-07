@@ -17,6 +17,18 @@ const exampleXlsx = readFileSync(
     ),
 );
 
+test('xlsx build exposes the runtime comparison switch and declarations', () => {
+    const model = new Model('comparison', 'en', 'UTC', 'en');
+    assert.equal(model.getRequireTwoIterativePasses(), true);
+    model.setRequireTwoIterativePasses(false);
+    assert.equal(model.getRequireTwoIterativePasses(), false);
+    const loaded = Model.fromXlsx(model.toXlsx(), 'comparison', 'en', 'UTC', 'en');
+    assert.equal(loaded.getRequireTwoIterativePasses(), true);
+    const declarations = readFileSync(new URL('../pkg-nodejs-xlsx/wasm.d.ts', import.meta.url), 'utf8');
+    assert.match(declarations, /setRequireTwoIterativePasses\(required: boolean\): void/);
+    assert.match(declarations, /getRequireTwoIterativePasses\(\): boolean/);
+});
+
 test('fromXlsx loads example.xlsx', () => {
     const model = Model.fromXlsx(exampleXlsx, 'example', 'en', 'UTC', 'en');
     const sheets = model.getWorksheetsProperties();

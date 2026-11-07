@@ -18,6 +18,16 @@ pub struct PyModel {
 
 #[pymethods]
 impl PyModel {
+    /// Require two completed passes for circular convergence (default true).
+    /// Local runtime configuration; not serialized or added to undo history.
+    pub fn set_require_two_iterative_passes(&mut self, required: bool) {
+        self.model.set_require_two_iterative_passes(required);
+    }
+
+    /// Whether circular convergence requires two completed passes.
+    pub fn get_require_two_iterative_passes(&self) -> bool {
+        self.model.get_require_two_iterative_passes()
+    }
     // Persistence
 
     /// Saves the workbook to an xlsx file
