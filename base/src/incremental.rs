@@ -299,11 +299,8 @@ impl Model<'_> {
     /// Direct workbook mutations still require a full evaluation.
     /// `None` means a safe full recalculation was performed.
     pub fn evaluate_incremental(&mut self, edited: &[(u32, i32, i32)]) -> Option<Vec<Key>> {
-        let _clock = self.start_calculation_clock();
         let changed = self.evaluate_incremental_headless(edited);
-        if self.evaluation.report.failure != Some(CalculationFailure::InvalidSettings) {
-            self.evaluate_conditional_formatting();
-        }
+        self.evaluate_conditional_formatting();
         changed
     }
 
@@ -413,7 +410,7 @@ impl Model<'_> {
             failure: None::<CalculationFailure>,
         };
         self.dependency_index = Some(index);
-        self.evaluation.display_timestamp = Some(self.calculation_timestamp_ms());
+        self.record_display_timestamp();
         Some(dirty)
     }
 }

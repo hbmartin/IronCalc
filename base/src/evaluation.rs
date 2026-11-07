@@ -634,6 +634,12 @@ impl<'a> Model<'a> {
         timestamp.unwrap_or_else(crate::model::get_milliseconds_since_epoch)
     }
 
+    /// Publish the active instant only after calculation or initial formatting
+    /// completes. Early validation exits leave the displayed results' time alone.
+    pub(crate) fn record_display_timestamp(&mut self) {
+        self.evaluation.display_timestamp = Some(self.calculation_timestamp_ms());
+    }
+
     /// Require a preceding completed pass before a circular calculation can
     /// converge (default true). False restores first-pass comparison with zero.
     /// The tolerance still measures successive changes, not mathematical stability.
@@ -676,11 +682,8 @@ impl<'a> Model<'a> {
     /// A circular reference evaluates to `#CIRC!`, unless iterative calculation is
     /// enabled in the workbook settings, see [`Model::set_iterative_calculation`].
     pub fn evaluate(&mut self) {
-        let _clock = self.start_calculation_clock();
         self.evaluate_headless();
-        if self.evaluation.report.failure != Some(CalculationFailure::InvalidSettings) {
-            self.evaluate_conditional_formatting();
-        }
+        self.evaluate_conditional_formatting();
     }
 
     /// Calculates without rebuilding conditional-formatting/UI caches.
@@ -724,7 +727,7 @@ impl<'a> Model<'a> {
                 .cells()
                 .all(|(_, _, cell)| scalar_calculation_cell(&cell))
         }));
-        self.evaluation.display_timestamp = Some(self.calculation_timestamp_ms());
+        self.record_display_timestamp();
     }
 
     /// Explicit convergence status; reaching the cap is never convergence.
@@ -945,8 +948,14 @@ impl<'a> Model<'a> {
     /// The evaluation stack-byte budget can stop a call before this limit.
     /// Deeper recursion requires explicitly sizing the hosting thread's stack
     /// and its evaluation budget; increasing this limit alone is insufficient.
+    /// Changing the effective limit invalidates only the report, without
+    /// recalculating or clearing result caches. An unchanged limit is a no-op.
     pub fn set_max_lambda_depth(&mut self, depth: usize) {
-        self.evaluation.max_lambda_depth = depth.max(1);
+        let depth = depth.max(1);
+        if self.evaluation.max_lambda_depth != depth {
+            self.evaluation.max_lambda_depth = depth;
+            self.evaluation.report = CalculationReport::default();
+        }
     }
 
     /// Returns the limit set by [`Model::set_max_lambda_depth`].
@@ -998,6 +1007,7 @@ impl<'a> Model<'a> {
     /// bounds the stack used and never changes a result. Lower it where the
     /// stack is small. The least it can be is 1. See also
     /// `set_max_evaluation_stack`: whichever limit is reached first applies.
+    /// Changing this limit retains the calculation report.
     pub fn set_max_evaluation_depth(&mut self, max_depth: usize) {
         self.evaluation.max_depth = max_depth.max(1);
     }
@@ -1011,8 +1021,13 @@ impl<'a> Model<'a> {
     /// counted from the first formula of the recursion. The evaluation can
     /// overshoot by what one formula needs, so leave room: a quarter of the
     /// stack is a reasonable value.
+    /// A change invalidates only the report without recalculating or clearing
+    /// result caches. An unchanged budget is a no-op.
     pub fn set_max_evaluation_stack(&mut self, bytes: usize) {
-        self.evaluation.max_stack = bytes;
+        if self.evaluation.max_stack != bytes {
+            self.evaluation.max_stack = bytes;
+            self.evaluation.report = CalculationReport::default();
+        }
     }
 
     /// The limit set by `set_max_evaluation_stack`.

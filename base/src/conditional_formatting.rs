@@ -156,7 +156,9 @@ impl<'a> Model<'a> {
                 self.apply_cf_rule(sheet_idx as u32, &cf.cf_rule, &ranges);
             }
         }
-        self.evaluation.display_timestamp = Some(self.calculation_timestamp_ms());
+        if self.evaluation.display_timestamp.is_none() {
+            self.record_display_timestamp();
+        }
     }
 
     // -----------------------------------------------------------------------

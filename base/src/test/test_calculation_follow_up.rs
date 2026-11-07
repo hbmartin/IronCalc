@@ -19,40 +19,49 @@ fn number(model: &Model, cell: &str) -> f64 {
     }
 }
 
+fn bold_rule(formula: &str) -> CfRuleInput {
+    CfRuleInput::Formula {
+        formula: formula.into(),
+        format: Dxf {
+            font: Some(DxfFont {
+                b: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        stop_if_true: false,
+    }
+}
+
+fn bold_at(model: &Model, row: i32, column: i32) -> bool {
+    model
+        .get_extended_style_for_cell(0, row, column)
+        .unwrap()
+        .style
+        .font
+        .b
+}
+
+fn assert_invalid_settings(model: &Model) {
+    let report = model.evaluation_report();
+    assert_eq!(report.failure, Some(CalculationFailure::InvalidSettings));
+    assert!(!report.converged);
+    assert_eq!(report.iterations, 0);
+}
+
 fn clock_model() -> Model<'static> {
     let mut model = new_empty_model();
     model._set("A1", "=NOW()");
     model._set("B1", "1");
     model._set("C1", "=HYPERLINK(\"https://example.com\",\"link\")");
     model
-        .add_conditional_formatting(
-            0,
-            "B1",
-            CfRuleInput::Formula {
-                formula: "NOW()=$A$1".into(),
-                format: Dxf {
-                    font: Some(DxfFont {
-                        b: Some(true),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                stop_if_true: false,
-            },
-        )
+        .add_conditional_formatting(0, "B1", bold_rule("NOW()=$A$1"))
         .unwrap();
     model
 }
 
 fn assert_clock_format_matches(model: &Model) {
-    assert!(
-        model
-            .get_extended_style_for_cell(0, 1, 2)
-            .unwrap()
-            .style
-            .font
-            .b
-    );
+    assert!(bold_at(model, 1, 2));
 }
 
 #[test]
@@ -129,6 +138,111 @@ fn user_switch_preserves_display_while_paused_with_iteration_on_or_off() {
         assert!(!model.can_undo());
         assert_eq!(model.flush_send_queue(), empty_queue);
     }
+}
+
+#[test]
+fn result_affecting_limits_invalidate_only_the_report_and_force_reevaluation() {
+    for lambda_limit in [false, true] {
+        let mut model = clock_model();
+        model._set("D1", "=LAMBDA(x,LAMBDA(y,y+1)(x))(1)");
+        model.evaluate();
+        assert!(model.evaluation_report().converged);
+        assert!(model.evaluate_incremental(&[]).is_some());
+        let index = model.dependency_index.clone().unwrap();
+        let cells = model.evaluation.cells.clone();
+        let links = model.get_links_list(0).unwrap();
+        let display = model.evaluation.display_timestamp;
+        let bytes = model.to_bytes();
+        let evaluations = model.evaluation.full_evaluations;
+        let original_limit = if lambda_limit {
+            let original = model.get_max_lambda_depth();
+            model.set_max_lambda_depth(1);
+            original
+        } else {
+            let original = model.get_max_evaluation_stack();
+            model.set_max_evaluation_stack(1);
+            original
+        };
+        assert_eq!(
+            model.evaluation_report().failure,
+            Some(CalculationFailure::NotEvaluated)
+        );
+        assert!(!model.evaluation_report().converged);
+        assert_eq!(model.evaluation_report().iterations, 0);
+        assert_eq!(model.evaluation.cells, cells);
+        assert!(std::sync::Arc::ptr_eq(
+            model.dependency_index.as_ref().unwrap(),
+            &index
+        ));
+        assert_eq!(model.get_links_list(0).unwrap(), links);
+        assert_eq!(model.evaluation.display_timestamp, display);
+        assert_eq!(model.to_bytes(), bytes);
+        assert_eq!(model.evaluation.full_evaluations, evaluations);
+        assert_eq!(number(&model, "D1"), 2.0);
+        assert_clock_format_matches(&model);
+        assert!(model.fork_evaluation_session().is_err());
+        assert!(model.evaluate_incremental_headless(&[]).is_none());
+        assert_eq!(
+            model.evaluation_report().failure,
+            Some(CalculationFailure::RecursionLimit)
+        );
+        assert!(!model.evaluation_report().converged);
+        assert!(model.fork_evaluation_session().is_err());
+        let failed = model.evaluation_report().clone();
+        if lambda_limit {
+            model.set_max_lambda_depth(1);
+            model.set_max_lambda_depth(0);
+            assert_eq!(model.get_max_lambda_depth(), 1);
+        } else {
+            model.set_max_evaluation_stack(1);
+        }
+        assert_eq!(model.evaluation_report(), &failed);
+        if lambda_limit {
+            model.set_max_lambda_depth(original_limit);
+        } else {
+            model.set_max_evaluation_stack(original_limit);
+        }
+        assert_eq!(
+            model.evaluation_report().failure,
+            Some(CalculationFailure::NotEvaluated)
+        );
+        assert!(model.evaluate_incremental(&[]).is_none());
+        assert!(model.evaluation_report().converged);
+        assert_eq!(number(&model, "D1"), 2.0);
+        assert_clock_format_matches(&model);
+        assert!(model.fork_evaluation_session().is_ok());
+        let successful = model.evaluation_report().clone();
+        if lambda_limit {
+            model.set_max_lambda_depth(original_limit);
+        } else {
+            model.set_max_evaluation_stack(original_limit);
+        }
+        assert_eq!(model.evaluation_report(), &successful);
+    }
+}
+
+#[test]
+fn cell_evaluation_depth_changes_retain_reports_and_results() {
+    let mut model = clock_model();
+    model._set("D1", "=D2+1");
+    model._set("D2", "=D3+1");
+    model._set("D3", "1");
+    model.evaluate();
+    let report = model.evaluation_report().clone();
+    let cells = model.evaluation.cells.clone();
+    let evaluations = model.evaluation.full_evaluations;
+    model.set_max_evaluation_depth(1);
+    model.set_max_evaluation_depth(0);
+    assert_eq!(model.get_max_evaluation_depth(), 1);
+    assert_eq!(model.evaluation_report(), &report);
+    assert_eq!(model.evaluation.cells, cells);
+    assert_eq!(model.evaluation.full_evaluations, evaluations);
+    assert_eq!(number(&model, "D1"), 3.0);
+    assert!(model.fork_evaluation_session().is_ok());
+    model.evaluate();
+    assert_eq!(model.evaluation_report(), &report);
+    assert_eq!(number(&model, "D1"), 3.0);
+    assert_clock_format_matches(&model);
 }
 
 #[test]
@@ -320,29 +434,14 @@ fn clock_survives_restarts_and_cell_chain_replay() {
 
 #[test]
 fn conditional_formats_share_the_formula_calculation_timestamp() {
-    use crate::cf_types::CfRuleInput;
-    use crate::types::Dxf;
-    let mut model = new_empty_model();
-    model._set("A1", "=NOW()");
-    model._set("B1", "1");
-    model
-        .add_conditional_formatting(
-            0,
-            "B1",
-            CfRuleInput::Formula {
-                formula: "NOW()=$A$1".into(),
-                format: Dxf::default(),
-                stop_if_true: false,
-            },
-        )
-        .unwrap();
+    let mut model = clock_model();
     with_advancing_time(1679356799000, 86_400_000, || {
         model.evaluate();
         assert_eq!(clock_reads(), 1);
-        assert!(!model.cf_cache.get(&(0, 1, 2)).unwrap().is_empty());
+        assert_clock_format_matches(&model);
         assert!(model.evaluate_incremental(&[]).is_some());
         assert_eq!(clock_reads(), 2);
-        assert!(!model.cf_cache.get(&(0, 1, 2)).unwrap().is_empty());
+        assert_clock_format_matches(&model);
     });
 }
 
@@ -491,6 +590,132 @@ fn unsuccessful_passes_refresh_display_but_invalid_settings_preserve_it() {
         assert_clock_format_matches(&model);
         assert_eq!(clock_reads(), 4);
     });
+}
+
+#[test]
+fn invalid_settings_rebuild_current_rules_at_the_retained_display_time() {
+    for incremental in [false, true] {
+        let mut model = clock_model();
+        model
+            .add_conditional_formatting(0, "E1", bold_rule("TRUE()"))
+            .unwrap();
+        with_advancing_time(1679356799000, 86_400_000, || {
+            model.evaluate();
+            let first = number(&model, "A1");
+            let display = model.evaluation.display_timestamp;
+            assert!(bold_at(&model, 1, 5));
+            model.workbook.settings.iterative_calculation.enabled = true;
+            model
+                .workbook
+                .settings
+                .iterative_calculation
+                .maximum_iterations = 0;
+            model
+                .update_conditional_formatting(0, 0, "B1:B2", bold_rule("NOW()=$A$1"))
+                .unwrap();
+            model.delete_conditional_formatting(0, 1).unwrap();
+            model
+                .add_conditional_formatting(0, "D1", bold_rule("TRUE()"))
+                .unwrap();
+            if incremental {
+                assert!(model.evaluate_incremental(&[]).is_none());
+            } else {
+                model.evaluate();
+            }
+            assert_invalid_settings(&model);
+            assert_eq!(number(&model, "A1"), first);
+            assert_eq!(model.evaluation.display_timestamp, display);
+            assert_clock_format_matches(&model);
+            assert!(bold_at(&model, 2, 2));
+            assert!(bold_at(&model, 1, 4));
+            assert!(!bold_at(&model, 1, 5));
+            assert_eq!(clock_reads(), 2);
+            assert!(model.evaluation.calculation_time.lock().unwrap().is_none());
+            model.set_theme(model.get_theme());
+            model.evaluate_conditional_formatting();
+            assert_invalid_settings(&model);
+            assert_clock_format_matches(&model);
+            assert_eq!(clock_reads(), 2);
+            model.workbook.settings.iterative_calculation.enabled = false;
+            if incremental {
+                assert!(model.evaluate_incremental(&[]).is_none());
+            } else {
+                model.evaluate();
+            }
+            assert!(model.evaluation_report().converged);
+            assert_eq!(model.evaluation_report().failure, None);
+            assert_eq!(number(&model, "A1"), first + 2.0);
+            assert_clock_format_matches(&model);
+            assert_eq!(clock_reads(), 3);
+        });
+    }
+}
+
+#[test]
+fn invalid_loaded_workbooks_refresh_formatting_after_edits_and_history() {
+    for through_bytes in [false, true] {
+        let mut raw = new_empty_model();
+        raw._set("A1", "5");
+        raw.add_conditional_formatting(0, "B1:B10", bold_rule("$A$1>3"))
+            .unwrap();
+        raw.workbook.settings.iterative_calculation.enabled = true;
+        raw.workbook
+            .settings
+            .iterative_calculation
+            .maximum_iterations = 0;
+        let loaded = if through_bytes {
+            Model::from_bytes(&raw.to_bytes(), "en").unwrap()
+        } else {
+            Model::from_workbook(raw.workbook, "en").unwrap()
+        };
+        assert_eq!(
+            loaded.evaluation_report().failure,
+            Some(CalculationFailure::NotEvaluated)
+        );
+        assert!(bold_at(&loaded, 1, 2));
+        let mut model = UserModel::from_model(loaded);
+        model.insert_rows(0, 1, 1).unwrap();
+        assert_invalid_settings(&model.model);
+        assert!(!bold_at(&model.model, 1, 2));
+        assert!(bold_at(&model.model, 2, 2));
+        assert!(bold_at(&model.model, 11, 2));
+        model.undo().unwrap();
+        assert!(bold_at(&model.model, 1, 2));
+        assert!(!bold_at(&model.model, 11, 2));
+        model.redo().unwrap();
+        assert!(!bold_at(&model.model, 1, 2));
+        assert!(bold_at(&model.model, 2, 2));
+        model
+            .add_conditional_formatting(0, "C1", bold_rule("$A$2>3"))
+            .unwrap();
+        assert!(bold_at(&model.model, 1, 3));
+        model.undo().unwrap();
+        assert!(!bold_at(&model.model, 1, 3));
+        model.redo().unwrap();
+        assert!(bold_at(&model.model, 1, 3));
+        model
+            .update_conditional_formatting(0, 1, "C1", bold_rule("$A$2<3"))
+            .unwrap();
+        assert!(!bold_at(&model.model, 1, 3));
+        model.undo().unwrap();
+        assert!(bold_at(&model.model, 1, 3));
+        model.redo().unwrap();
+        assert!(!bold_at(&model.model, 1, 3));
+        model.delete_conditional_formatting(0, 0).unwrap();
+        assert!(!bold_at(&model.model, 2, 2));
+        model.undo().unwrap();
+        assert!(bold_at(&model.model, 2, 2));
+        model.redo().unwrap();
+        assert!(!bold_at(&model.model, 2, 2));
+        assert_invalid_settings(&model.model);
+        let mut raw = model.model;
+        raw.insert_rows(0, 1, 1).unwrap();
+        raw.add_conditional_formatting(0, "D1", bold_rule("$A$3>3"))
+            .unwrap();
+        assert!(raw.evaluate_incremental(&[]).is_none());
+        assert_invalid_settings(&raw);
+        assert!(bold_at(&raw, 1, 4));
+    }
 }
 
 #[test]
