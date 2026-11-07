@@ -104,8 +104,8 @@ follow their owning cells through row, column, cut and sheet operations, even
 when calculation fails or is paused. Formatting refreshes once at the outer edit
 or history boundary, using retained values. Intact spill groups move as groups;
 a partially broken dynamic spill loses its children and resets its extent while
-retaining a surviving anchor's cached value until calculation. CSE restrictions
-remain unchanged. These are retained results, not a successful new calculation.
+retaining a surviving anchor's cached value until calculation. Partial CSE edits
+remain restricted; complete cuts preserve array identity. These are retained results, not a successful new calculation.
 
 Local undo/redo keeps sparse runtime display deltas alongside existing history,
 restoring cached values, spills and dynamic links without calculation. The deltas
@@ -117,8 +117,10 @@ the workbook before and after every edit. Structural remapping retains its
 broader snapshots. Journals do not affect encoded bytes or equality, and clones,
 loads and forks start without active observation.
 
-Structural remapping and cell movement mark replay-sensitive journal writes.
-Their display entries are retained even when the cached payload at a position
+Structural remapping and cell movement mark only positions whose ownership moves
+or disappears, plus their destinations and affected spill groups. Identity
+restoration skips unchanged payloads. Unrelated equal caches are not retained
+in structural history. Replay-sensitive display entries are retained even when the cached payload at a position
 compares equal: undo/redo first moves cells, so position equality alone cannot
 identify redundant history. Ordinary edits still omit equal payloads. Merge
 operations transfer cached formula results and dynamic links to their anchor;
@@ -130,8 +132,10 @@ their vectors each time an entry changes stacks. History remains unbounded.
 Edit guards own their mutable borrow through final calculation and publication.
 If an edit panics, unwinding releases nesting, pending effects and observers and
 marks calculation out of date. This cleanup does not roll back partial mutations
-or run calculation/formatting; ordinary validation errors retain their existing
-atomicity guarantees.
+or run calculation/formatting. Conditional-formatting rebuilds publish only a
+complete overlay; unwinding retains the last complete overlay and schedules
+repair at the next successful edit or explicit refresh. Ordinary validation
+errors retain their existing atomicity guarantees.
 
 Calculation and formatting requests are separate. Rule changes refresh formatting
 without invalidating reports or dependencies, including during local history and
@@ -298,3 +302,42 @@ these measurements are not a claim that every workload becomes faster.
 
 Only generic calculation changes and synthetic tests belong here. Application
 code and proprietary financial workbook fixtures stay in the private backend.
+
+### Clipboard preparation and display ownership
+
+Clipboard operations are prepared on isolated state containing only affected
+cells, complete touched spill groups, and required formula rewrites. Ordinary
+setters provide input and permission validation; preparation never evaluates
+formulas or reads the clock. Metadata needed to resolve formulas/styles is
+copied, but unrelated cell storage is not. Commit publishes the prepared cells,
+metadata and existing diffs without repeating fallible input validation. Rejected
+preparation changes no live values, reports, caches, selection, history or queues.
+Translated merges determine which formulas survive; invalid translated merges
+continue to be skipped. Complete CSE cuts and dependent CSE rewrites retain their
+array kind and extent through grouped clears and existing array diffs, including
+1x1 CSE formulas moved by merging. Partial CSE edits remain rejected. A moved
+dynamic merge anchor retains its value but starts with a 1x1 cached extent.
+Cross-sheet cuts retain references to cells outside the cut on their source
+sheet (for example, `=C5` becomes `=Sheet1!C5` after moving to Sheet2).
+
+Remote display conflicts are classified exhaustively, accumulated in application
+order and pruned once per batch from both history stacks. Empty footprints skip
+history traversal; unaffected shared supplements retain their handles. Merge
+geometry, old/new spill owners and newly created or restored sheet identities
+retire stale ownership, including reused sheet IDs. Ordinary encoded history
+still is not rebased. Missing remote runtime results are not synthesized.
+
+Scalar clears mark reports NotEvaluated and block forks while retaining an
+internal baseline eligible for incremental evaluation. Structural, spill/array,
+settings/resource-limit and failed-calculation invalidation remain conservative.
+Neutral and no-op edits do not carry pending formatting effects into later edits;
+recovery from an earlier panic is the exception that repairs formatting.
+
+Regional settings keep separate setter history and calculations. All selectable
+values are validated before the first setter. If an unexpected later setter
+fails, applied changes remain saved and redraw, while the drawer retains pending
+selections and displays a translated error. No combined settings API is added.
+Locale/timezone transition preflight rejects a whole incoming batch while paused
+or when enabled iteration settings are invalid at that transition; iteration
+setting changes alone remain allowed while paused. The Python retry example
+catches WorkbookError and lets unrelated failures propagate.

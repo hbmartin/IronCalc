@@ -4,6 +4,7 @@ mod autofill;
 mod border;
 mod border_utils;
 mod clipboard;
+mod clipboard_plan;
 mod common;
 mod conditional_formatting;
 pub(crate) mod history;
@@ -22,6 +23,9 @@ pub use ui::SelectedView;
 pub use clipboard::ClipboardData;
 pub use common::BorderArea;
 
+#[cfg(test)]
+#[path = "../test/test_clipboard_follow_up.rs"]
+mod clipboard_follow_up_tests;
 mod display;
 #[cfg(test)]
 #[path = "../test/test_display_replay.rs"]

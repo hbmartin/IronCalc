@@ -403,6 +403,7 @@ impl RestartLog {
 
 /// Everything the evaluation needs besides the workbook itself.
 pub(crate) struct Evaluation {
+    pub(crate) incremental_after_clear: bool,
     /// The dynamic anchors, in the order in which they are evaluated. Kept
     /// across evaluations: the order the restarts arrived at stays, so the
     /// next evaluation needs no restart. New anchors are appended in natural
@@ -533,6 +534,7 @@ fn default_max_depth() -> usize {
 impl Default for Evaluation {
     fn default() -> Self {
         Evaluation {
+            incremental_after_clear: false,
             anchor_order: Vec::new(),
             cells: HashMap::default(),
             stack: Vec::new(),
@@ -663,6 +665,7 @@ impl<'a> Model<'a> {
         }
         self.evaluation.require_two_iterative_passes = required;
         self.evaluation.report = CalculationReport::default();
+        self.evaluation.incremental_after_clear = false;
         true
     }
 
@@ -679,7 +682,8 @@ impl<'a> Model<'a> {
         self.evaluation.circular.clear();
         self.evaluation.scalar_only = None;
         self.evaluation.report = CalculationReport::default();
-        self.evaluation.display.formatting_requested = true;
+        self.evaluation.incremental_after_clear = false;
+        self.evaluation.display.formatting_requested |= self.evaluation.display.edit_depth > 0;
     }
 
     /// Evaluates every formula in the workbook.
@@ -707,6 +711,7 @@ impl<'a> Model<'a> {
         self.evaluation.scalar_only = None;
         let settings = self.workbook.settings.iterative_calculation.clone();
         self.evaluation.report = CalculationReport::default();
+        self.evaluation.incremental_after_clear = false;
         self.evaluation.recursion_limit_hit = false;
         self.evaluation.lambda_depth = 0;
         if settings.enabled && settings.validate().is_err() {
@@ -965,6 +970,7 @@ impl<'a> Model<'a> {
         if self.evaluation.max_lambda_depth != depth {
             self.evaluation.max_lambda_depth = depth;
             self.evaluation.report = CalculationReport::default();
+            self.evaluation.incremental_after_clear = false;
         }
     }
 
@@ -1040,6 +1046,7 @@ impl<'a> Model<'a> {
         if self.evaluation.max_stack != bytes {
             self.evaluation.max_stack = bytes;
             self.evaluation.report = CalculationReport::default();
+            self.evaluation.incremental_after_clear = false;
         }
     }
 

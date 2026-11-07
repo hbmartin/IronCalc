@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { initSync, Model } from "@ironcalc/wasm";
 import { beforeAll, expect, test, vi } from "vitest";
-import { saveRegionalSettings } from "../src/components/RightDrawer/RegionalSettings/saveRegionalSettings";
+import {
+  saveAndRedrawRegionalSettings,
+  saveRegionalSettings,
+} from "../src/components/RightDrawer/RegionalSettings/saveRegionalSettings";
 
 beforeAll(async () => {
   initSync({
@@ -21,7 +24,7 @@ test("paused context rejection preserves the workbook and can be retried", () =>
   model.pauseEvaluation();
   const bytes = model.toBytes();
   const result = saveRegionalSettings(model, "fr", "Europe/Paris", "en");
-  expect(result.error).toMatch(/paused/);
+  expect(result.error?.code).toMatch(/paused/);
   expect(model.toBytes()).toEqual(bytes);
   expect(model.getLocale()).toBe("en");
   expect(model.getTimezone()).toBe("UTC");
@@ -43,9 +46,9 @@ test.each([
     const model = newModel();
     const before = model.toBytes();
     const setter = vi.spyOn(model, "setLocale");
-    expect(saveRegionalSettings(model, locale, timezone, "en").error).toMatch(
-      error,
-    );
+    expect(
+      saveRegionalSettings(model, locale, timezone, "en").error?.code,
+    ).toMatch(error);
     expect(setter).not.toHaveBeenCalled();
     expect(model.toBytes()).toEqual(before);
     expect(model.flushSendQueue()).toHaveLength(1);
@@ -99,9 +102,9 @@ test("invalid-settings errors are returned before later setters run", () => {
   const timezone = vi.spyOn(model, "setTimezone");
   const language = vi.spyOn(model, "setLanguage");
   const before = model.toBytes();
-  expect(saveRegionalSettings(model, "fr", "Europe/Paris", "es").error).toMatch(
-    /invalid iterative calculation settings/,
-  );
+  expect(
+    saveRegionalSettings(model, "fr", "Europe/Paris", "es").error?.code,
+  ).toMatch(/invalid_iteration/);
   expect(timezone).not.toHaveBeenCalled();
   expect(language).not.toHaveBeenCalled();
   expect(model.toBytes()).toEqual(before);
@@ -110,13 +113,93 @@ test("invalid-settings errors are returned before later setters run", () => {
 test("timezone-only rejection and non-Error throws become save errors", () => {
   const model = newModel();
   model.pauseEvaluation();
-  expect(saveRegionalSettings(model, "en", "Europe/Paris", "en").error).toMatch(
-    /paused/,
-  );
+  expect(
+    saveRegionalSettings(model, "en", "Europe/Paris", "en").error?.code,
+  ).toMatch(/paused/);
   vi.spyOn(model, "setTimezone").mockImplementation(() => {
     throw "settings rejected";
   });
-  expect(saveRegionalSettings(model, "en", "Europe/Paris", "en").error).toBe(
-    "settings rejected",
+  expect(saveRegionalSettings(model, "en", "Europe/Paris", "en").error).toEqual(
+    { code: "save_failed", detail: "settings rejected" },
   );
+});
+
+test("invalid language is rejected before any setter", () => {
+  const model = newModel();
+  const before = model.toBytes();
+  const locale = vi.spyOn(model, "setLocale");
+  expect(saveRegionalSettings(model, "fr", "Europe/Paris", "invalid")).toEqual({
+    error: { code: "invalid_language", value: "invalid" },
+    changed: false,
+  });
+  expect(locale).not.toHaveBeenCalled();
+  expect(model.toBytes()).toEqual(before);
+});
+
+test.each(["setTimezone", "setLanguage"] as const)(
+  "partial success is reported when %s fails",
+  (setter) => {
+    const model = newModel();
+    vi.spyOn(model, setter).mockImplementation(() => {
+      throw new Error("later setter failed");
+    });
+    const result = saveRegionalSettings(model, "fr", "Europe/Paris", "es");
+    expect(result.changed).toBe(true);
+    expect(result.error?.code).toBe("save_failed");
+    expect(model.getLocale()).toBe("fr");
+    expect(model.getLanguage()).toBe("en");
+  },
+);
+
+test("supported formula languages remain accepted by the real engine", () => {
+  const model = newModel();
+  for (const language of ["en", "es", "fr", "de", "it"]) {
+    expect(saveRegionalSettings(model, "en", "UTC", language).error).toBeNull();
+    expect(model.getLanguage()).toBe(language);
+  }
+});
+
+test("redraw follows partial changes and skips rejected unchanged saves", () => {
+  const model = newModel();
+  const redraw = vi.fn();
+  model.pauseEvaluation();
+  expect(
+    saveAndRedrawRegionalSettings(model, "fr", "Europe/Paris", "en", redraw)
+      .changed,
+  ).toBe(false);
+  expect(redraw).not.toHaveBeenCalled();
+  model.resumeEvaluation();
+  const timezone = vi.spyOn(model, "setTimezone").mockImplementation(() => {
+    throw new Error("later failure");
+  });
+  expect(
+    saveAndRedrawRegionalSettings(model, "fr", "Europe/Paris", "en", redraw)
+      .error?.code,
+  ).toBe("save_failed");
+  expect(redraw).toHaveBeenCalledTimes(1);
+  timezone.mockRestore();
+  expect(
+    saveAndRedrawRegionalSettings(model, "fr", "Europe/Paris", "en", redraw)
+      .error,
+  ).toBeNull();
+  expect(redraw).toHaveBeenCalledTimes(2);
+});
+
+test("settings errors have translated presentation in every bundled language", async () => {
+  const { default: i18n } = await import("../src/i18n");
+  await i18n.init();
+  for (const language of ["en-US", "es-ES", "fr-FR", "de-DE", "it-IT"]) {
+    const bundle = i18n.getResourceBundle(language, "translation");
+    for (const code of [
+      "invalid_locale",
+      "invalid_timezone",
+      "invalid_language",
+      "paused",
+      "invalid_iteration",
+      "save_failed",
+    ]) {
+      expect(bundle.regional_settings.errors[code]).toBeTypeOf("string");
+      expect(bundle.regional_settings.errors[code].length).toBeGreaterThan(10);
+    }
+  }
 });

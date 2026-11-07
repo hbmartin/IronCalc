@@ -57,8 +57,10 @@ Collaboration
 .. method:: UserModel.apply_external_diffs(external_diffs: bytes)
 
    Applies a list of diffs produced by another model's ``flush_send_queue``.
-   A context-changing batch can be rejected while evaluation is paused or
-   iteration settings are invalid. Rejection applies nothing; retain and retry
+   A batch containing changed locale/timezone transitions is rejected while
+   evaluation is paused or enabled iteration settings are invalid at that
+   transition in ordered replay. Iteration-setting changes alone remain allowed
+   while paused. Context preflight rejection applies nothing; retain and retry
    the same bytes after resolving the cause, before sending later batches.
 
 Undo, redo and evaluation

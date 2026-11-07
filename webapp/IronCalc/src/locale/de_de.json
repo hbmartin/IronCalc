@@ -321,6 +321,14 @@
     "title": "Benutzerdefiniertes Zahlenformat"
   },
   "regional_settings": {
+    "errors": {
+      "invalid_iteration": "Korrigiere die Einstellungen zur iterativen Berechnung, bevor du Gebietsschema oder Zeitzone änderst.",
+      "invalid_language": "Nicht unterstützte Formelsprache: {{value}}",
+      "invalid_locale": "Nicht unterstütztes Gebietsschema: {{value}}",
+      "invalid_timezone": "Nicht unterstützte Zeitzone: {{value}}",
+      "paused": "Setze die Berechnung fort, bevor du Gebietsschema oder Zeitzone änderst.",
+      "save_failed": "Nicht alle Einstellungen konnten gespeichert werden. Deine Auswahl bleibt erhalten; bereits angewendete Änderungen bleiben gespeichert."
+    },
     "language": {
       "display_language": {
         "de": "Deutsch",

@@ -36,7 +36,7 @@ import useKeyboardNavigation from "./useKeyboardNavigation";
 import "./workbook.css";
 import { LinkDialog } from "../LinkDialog/LinkDialog";
 import { Alert } from "../Modal";
-import { saveRegionalSettings } from "../RightDrawer/RegionalSettings/saveRegionalSettings";
+import { saveAndRedrawRegionalSettings } from "../RightDrawer/RegionalSettings/saveRegionalSettings";
 
 function colorToParam(color: Color): string {
   if (color === undefined) {
@@ -1191,16 +1191,13 @@ const Workbook = (props: {
         initialTimezone={model.getTimezone()}
         initialLanguage={model.getLanguage()}
         onSettingsSave={(locale, timezone, language) => {
-          const result = saveRegionalSettings(
+          return saveAndRedrawRegionalSettings(
             model,
             locale,
             timezone,
             language,
+            () => setRedrawId((id) => id + 1),
           );
-          if (result.error === null) {
-            setRedrawId((id) => id + 1);
-          }
-          return result;
         }}
       />
       <Alert

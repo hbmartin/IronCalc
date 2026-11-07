@@ -321,6 +321,14 @@
     "title": "Formato numero personalizzato"
   },
   "regional_settings": {
+    "errors": {
+      "invalid_iteration": "Correggi le impostazioni del calcolo iterativo prima di modificare le impostazioni locali o il fuso orario.",
+      "invalid_language": "Lingua delle formule non supportata: {{value}}",
+      "invalid_locale": "Impostazioni locali non supportate: {{value}}",
+      "invalid_timezone": "Fuso orario non supportato: {{value}}",
+      "paused": "Riprendi il calcolo prima di modificare le impostazioni locali o il fuso orario.",
+      "save_failed": "Impossibile salvare tutte le impostazioni. Le selezioni sono conservate; le modifiche già applicate restano salvate."
+    },
     "language": {
       "display_language": {
         "de": "Deutsch",

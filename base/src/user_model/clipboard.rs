@@ -52,9 +52,9 @@ type NameUpdate = (String, Option<u32>, String, String);
 type FormattingUpdate = (u32, usize, String, CfRule);
 
 /// Only validated input reaches the mutating phase. No formulas run in planning.
-struct ClipboardPastePlan {
+pub(super) struct ClipboardPastePlan {
     values: HashMap<(i32, i32), String>,
-    formula_updates: Vec<FormulaUpdate>,
+    pub(super) formula_updates: Vec<FormulaUpdate>,
     name_updates: Vec<NameUpdate>,
     formatting_updates: Vec<FormattingUpdate>,
 }
@@ -214,14 +214,11 @@ impl<'a> UserModel<'a> {
         is_cut: bool,
     ) -> Result<(), String> {
         let plan = self.plan_clipboard_paste(source_sheet, source_range, clipboard, is_cut)?;
+        let prepared =
+            self.prepare_clipboard_commit(source_sheet, source_range, clipboard, is_cut, plan)?;
         self.with_user_display_edit(true, |this| {
-            this.paste_from_clipboard_in_display_edit(
-                source_sheet,
-                source_range,
-                clipboard,
-                is_cut,
-                plan,
-            )
+            this.commit_clipboard(prepared);
+            Ok(())
         })
     }
 
@@ -260,55 +257,19 @@ impl<'a> UserModel<'a> {
                 return Err("Clipboard range out of boundaries".into());
             }
         }
-        if !self.model.can_clear_range(&target)?
+        if (!is_cut && !self.model.can_clear_range(&target)?)
             || (is_cut && !self.model.can_clear_range(&source)?)
         {
             return Err("Cannot clear the range because it contains array formulas".into());
         }
-        let merges: Vec<_> = self
-            .model
-            .get_merged_cells(source_sheet)?
-            .iter()
-            .filter(|m| m.intersects(r1, c1, source.width, source.height))
-            .map(|m| MergedCell {
-                row: m.row + target.row - r1,
-                column: m.column + target.column - c1,
-                width: m.width,
-                height: m.height,
-            })
-            .collect();
-        self.plan_merges_replaced_by_paste(&target, &merges)?;
         let mut values = HashMap::new();
         for (&row, data) in clipboard {
             for (&column, cell) in data {
                 if row < r1 || row > r2 || column < c1 || column > c2 {
                     return Err("Source is outside the area".into());
                 }
-                let target_row = target.row + row - r1;
-                let target_column = target.column + column - c1;
-                self.model
-                    .get_style_for_cell(target.sheet, target_row, target_column)?;
-                self.model.get_style_for_cell(source_sheet, row, column)?;
                 if cell.is_spill {
                     continue;
-                }
-                if !cell.text.starts_with('\'')
-                    && self.model.formula_without_prefix(&cell.text).is_none()
-                {
-                    let mut currencies = vec!["$", "€"];
-                    let currency = &self.model.locale.currency.symbol;
-                    if !currencies.contains(&currency.as_str()) {
-                        currencies.push(currency);
-                    }
-                    if let Ok((number, _)) = crate::formatter::format::parse_formatted_number(
-                        &cell.text,
-                        &currencies,
-                        self.model.locale,
-                    ) {
-                        if !number.is_finite() {
-                            return Err(format!("A cell cannot hold the number {number}"));
-                        }
-                    }
                 }
                 let from = CellReferenceIndex {
                     sheet: source_sheet,
@@ -369,7 +330,7 @@ impl<'a> UserModel<'a> {
         })
     }
 
-    fn paste_from_clipboard_in_display_edit(
+    pub(super) fn paste_from_clipboard_in_display_edit(
         &mut self,
         source_sheet: u32,
         source_range: ClipboardTuple,
@@ -378,6 +339,9 @@ impl<'a> UserModel<'a> {
         mut plan: ClipboardPastePlan,
     ) -> Result<(), String> {
         let retained_cut = is_cut.then(|| self.model.display_snapshot());
+        if let Some(before) = &retained_cut {
+            self.model.record_snapshot_links(before);
+        }
         let source_id = self.model.workbook.worksheet(source_sheet)?.sheet_id;
         if is_cut {
             // Moving cells also rewrites references outside the pasted area.
@@ -385,6 +349,30 @@ impl<'a> UserModel<'a> {
             self.model.invalidate_calculation();
         }
         let mut diff_list = Vec::new();
+        let mut cse_sources = HashMap::new();
+        if is_cut {
+            let (r1, c1, r2, c2) = source_range;
+            for row in r1..=r2 {
+                for column in c1..=c2 {
+                    if let Some(Cell::ArrayFormula {
+                        kind: ArrayKind::Cse,
+                        r: (w, h),
+                        ..
+                    }) = self
+                        .model
+                        .workbook
+                        .worksheet(source_sheet)?
+                        .cell(row, column)
+                        .as_deref()
+                    {
+                        cse_sources.insert((row, column), (*w, *h));
+                    }
+                }
+            }
+            for (&(row, column), &(width, height)) in &cse_sources {
+                self.clear_prepared_cse(source_sheet, row, column, width, height, &mut diff_list)?;
+            }
+        }
         let view = self.get_selected_view();
         let (source_first_row, source_first_column, source_last_row, source_last_column) =
             source_range;
@@ -500,15 +488,33 @@ impl<'a> UserModel<'a> {
         // set the new values and styles
         for (target_row, target_column, old_value, old_style, new_value, style) in changes {
             if let Some(ref v) = new_value {
-                self.model
-                    .set_user_input(sheet, target_row, target_column, v.clone())?;
-                diff_list.push(Diff::SetCellValue {
-                    sheet,
-                    row: target_row,
-                    column: target_column,
-                    new_value: v.clone(),
-                    old_value: Box::new(old_value),
-                });
+                let source_position = (
+                    source_first_row + target_row - selected_row,
+                    source_first_column + target_column - selected_column,
+                );
+                if let Some(&(width, height)) = cse_sources.get(&source_position) {
+                    self.set_prepared_array(
+                        &Area {
+                            sheet,
+                            row: target_row,
+                            column: target_column,
+                            width,
+                            height,
+                        },
+                        v,
+                        &mut diff_list,
+                    )?;
+                } else {
+                    self.model
+                        .set_user_input(sheet, target_row, target_column, v.clone())?;
+                    diff_list.push(Diff::SetCellValue {
+                        sheet,
+                        row: target_row,
+                        column: target_column,
+                        new_value: v.clone(),
+                        old_value: Box::new(old_value),
+                    });
+                }
             }
             self.model
                 .set_cell_style(sheet, target_row, target_column, &style)?;
@@ -618,6 +624,25 @@ impl<'a> UserModel<'a> {
                     if (source_sheet == sheet) && seen_cells.contains(&(row, column)) {
                         continue;
                     }
+                    let cse_cleared = cse_sources.iter().any(|(&(r, c), &(w, h))| {
+                        row >= r && row < r + h && column >= c && column < c + w
+                    });
+                    if cse_cleared {
+                        let old_style =
+                            self.model
+                                .get_cell_style_or_none(source_sheet, row, column)?;
+                        let default_style = Style::default();
+                        self.model
+                            .set_cell_style(source_sheet, row, column, &default_style)?;
+                        diff_list.push(Diff::SetCellStyle {
+                            sheet: source_sheet,
+                            row,
+                            column,
+                            old_value: Box::new(old_style),
+                            new_value: Box::new(default_style),
+                        });
+                        continue;
+                    }
                     let old_value = self
                         .model
                         .workbook
@@ -693,12 +718,49 @@ impl<'a> UserModel<'a> {
             // Update external formulas that reference cells in the moved area.
             // source_sheet is used here (not `sheet`) so cross-sheet paste works.
             for (ext_sheet, ext_row, ext_col, new_formula) in plan.formula_updates {
+                if self
+                    .model
+                    .workbook
+                    .worksheet(ext_sheet)?
+                    .is_covered_cell(ext_row, ext_col)
+                {
+                    continue;
+                }
                 let old_cell = self
                     .model
                     .workbook
                     .worksheet(ext_sheet)?
                     .cell(ext_row, ext_col)
                     .map(Cow::into_owned);
+                if let Some(Cell::ArrayFormula {
+                    kind: ArrayKind::Cse,
+                    r: (w, h),
+                    ..
+                }) = &old_cell
+                {
+                    let (width, height) = (*w, *h);
+                    self.clear_prepared_cse(
+                        ext_sheet,
+                        ext_row,
+                        ext_col,
+                        width,
+                        height,
+                        &mut diff_list,
+                    )?;
+                    self.set_prepared_array(
+                        &Area {
+                            sheet: ext_sheet,
+                            row: ext_row,
+                            column: ext_col,
+                            width,
+                            height,
+                        },
+                        &new_formula,
+                        &mut diff_list,
+                    )?;
+                    // Formula rewriting preserves the displayed group until calculation.
+                    continue;
+                }
                 self.model
                     .set_user_input(ext_sheet, ext_row, ext_col, new_formula.clone())?;
                 diff_list.push(Diff::SetCellValue {
@@ -860,6 +922,105 @@ impl<'a> UserModel<'a> {
         self.set_selected_range(selected_row, selected_column, max_row, max_column)?;
         self.push_diff_list(diff_list);
         self.evaluate_if_not_paused();
+        Ok(())
+    }
+
+    fn set_prepared_array(
+        &mut self,
+        area: &Area,
+        value: &str,
+        diffs: &mut Vec<Diff>,
+    ) -> Result<(), String> {
+        let Area {
+            sheet,
+            row,
+            column,
+            width,
+            height,
+        } = *area;
+        let merged = self.model.get_merged_cells(sheet)?.to_vec();
+        let temporary_unmerge =
+            width == 1 && height == 1 && merged.iter().any(|m| m.row == row && m.column == column);
+        let without: Vec<_> = merged
+            .iter()
+            .filter(|m| !(m.row == row && m.column == column))
+            .copied()
+            .collect();
+        if temporary_unmerge {
+            self.model.workbook.worksheet_mut(sheet)?.merged_cells = without.clone();
+            diffs.push(Diff::SetMergedCells {
+                sheet,
+                old_value: merged.clone(),
+                new_value: without.clone(),
+            });
+        }
+        let old_values = self.array_old_values(sheet, row, column, width, height)?;
+        self.model
+            .set_user_array_formula(sheet, row, column, width, height, value)?;
+        diffs.push(Diff::SetArrayValue {
+            sheet,
+            row,
+            column,
+            width,
+            height,
+            new_value: value.into(),
+            old_values,
+        });
+        if temporary_unmerge {
+            self.model.workbook.worksheet_mut(sheet)?.merged_cells = merged.clone();
+            diffs.push(Diff::SetMergedCells {
+                sheet,
+                old_value: without,
+                new_value: merged,
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn array_old_values(
+        &self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<Vec<Vec<Option<Cell>>>, String> {
+        let ws = self.model.workbook.worksheet(sheet)?;
+        Ok((row..row + height)
+            .map(|r| {
+                (column..column + width)
+                    .map(|c| ws.cell(r, c).map(Cow::into_owned))
+                    .collect()
+            })
+            .collect())
+    }
+    fn clear_prepared_cse(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        width: i32,
+        height: i32,
+        diffs: &mut Vec<Diff>,
+    ) -> Result<(), String> {
+        let area = Area {
+            sheet,
+            row,
+            column,
+            width,
+            height,
+        };
+        let old_value = self.array_old_values(sheet, row, column, width, height)?;
+        diffs.extend(self.range_link_diffs(&area)?);
+        self.model.range_clear_contents(&area)?;
+        diffs.push(Diff::RangeClearContents {
+            sheet,
+            row,
+            column,
+            width,
+            height,
+            old_value,
+        });
         Ok(())
     }
 

@@ -321,6 +321,14 @@
     "title": "Format de nombre personnalisé"
   },
   "regional_settings": {
+    "errors": {
+      "invalid_iteration": "Corrigez les paramètres du calcul itératif avant de modifier les paramètres régionaux ou le fuseau horaire.",
+      "invalid_language": "Langue des formules non prise en charge : {{value}}",
+      "invalid_locale": "Paramètres régionaux non pris en charge : {{value}}",
+      "invalid_timezone": "Fuseau horaire non pris en charge : {{value}}",
+      "paused": "Reprenez le calcul avant de modifier les paramètres régionaux ou le fuseau horaire.",
+      "save_failed": "Certains paramètres n’ont pas pu être enregistrés. Vos choix sont conservés ; les modifications déjà appliquées restent enregistrées."
+    },
     "language": {
       "display_language": {
         "de": "Deutsch",

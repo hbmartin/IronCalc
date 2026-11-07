@@ -430,8 +430,9 @@ impl<'a> UserModel<'a> {
 
     /// This are external diffs that need to be applied to the model
     ///
-    /// Context-changing batches are rejected atomically while evaluation is
-    /// paused or their ordered transitions encounter invalid iteration settings.
+    /// Batches with changed locale/timezone transitions are rejected atomically
+    /// while evaluation is paused or enabled iteration settings are invalid at
+    /// that transition. Iteration-setting changes alone remain allowed while paused.
     /// The caller owns the payload and must retain it for retry after resolving
     /// the rejection. This model does not queue rejected batches internally.
     ///
@@ -448,18 +449,24 @@ impl<'a> UserModel<'a> {
     fn apply_external_diffs_in_display_edit(&mut self, diff_list_str: &[u8]) -> Result<(), String> {
         if let Ok(queue_diffs_list) = bitcode::decode::<Vec<QueueDiffs>>(diff_list_str) {
             self.preflight_context_queue(&queue_diffs_list)?;
-            for queue_diff in queue_diffs_list {
-                let undo = matches!(queue_diff.r#type, DiffType::Undo);
-                if undo {
-                    for diff in queue_diff.list.iter().rev() {
-                        self.apply_external_display_diff(diff, true)?;
-                    }
-                } else {
-                    for diff in &queue_diff.list {
-                        self.apply_external_display_diff(diff, false)?;
+            let mut conflicts = crate::display::DisplayConflicts::default();
+            let result: Result<(), String> = (|| {
+                for queue_diff in queue_diffs_list {
+                    let undo = matches!(queue_diff.r#type, DiffType::Undo);
+                    if undo {
+                        for diff in queue_diff.list.iter().rev() {
+                            self.apply_external_display_diff(diff, true, &mut conflicts)?;
+                        }
+                    } else {
+                        for diff in &queue_diff.list {
+                            self.apply_external_display_diff(diff, false, &mut conflicts)?;
+                        }
                     }
                 }
-            }
+                Ok(())
+            })();
+            self.discard_external_display_conflicts(&conflicts);
+            result?;
         } else {
             return Err("Error parsing diff list".to_string());
         }
@@ -2636,8 +2643,8 @@ impl<'a> UserModel<'a> {
     /// This local runtime option is not saved, sent as a diff, or added to history.
     /// A change evaluates once unless evaluation is paused; the same value is a no-op.
     pub fn set_require_two_iterative_passes(&mut self, required: bool) {
-        if self.model.update_require_two_iterative_passes(required) {
-            self.evaluate_if_not_paused();
+        if self.model.update_require_two_iterative_passes(required) && !self.pause_evaluation {
+            self.model.evaluate();
         }
     }
 
