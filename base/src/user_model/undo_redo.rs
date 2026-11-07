@@ -9,10 +9,10 @@ use crate::{
 };
 
 use crate::user_model::common::selected_sheet_after_move;
-use crate::user_model::history::{Diff, DiffList};
+use crate::user_model::history::Diff;
 
 impl<'a> UserModel<'a> {
-    pub(super) fn apply_undo_diff_list(&mut self, diff_list: &DiffList) -> Result<(), String> {
+    pub(super) fn apply_undo_diff_list(&mut self, diff_list: &[Diff]) -> Result<(), String> {
         let mut needs_evaluation = false;
         let mut needs_formatting = false;
         for diff in diff_list.iter().rev() {
@@ -669,7 +669,7 @@ impl<'a> UserModel<'a> {
     }
 
     /// Applies diff list
-    pub(super) fn apply_diff_list(&mut self, diff_list: &DiffList) -> Result<(), String> {
+    pub(super) fn apply_diff_list(&mut self, diff_list: &[Diff]) -> Result<(), String> {
         let mut needs_evaluation = false;
         let mut needs_formatting = false;
         for diff in diff_list {

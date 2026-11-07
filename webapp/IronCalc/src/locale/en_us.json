@@ -321,6 +321,14 @@
     "title": "Custom number format"
   },
   "regional_settings": {
+    "errors": {
+      "invalid_iteration": "Correct the iterative calculation settings before changing locale or timezone.",
+      "invalid_language": "Unsupported formula language: {{value}}",
+      "invalid_locale": "Unsupported locale: {{value}}",
+      "invalid_timezone": "Unsupported timezone: {{value}}",
+      "paused": "Resume calculation before changing locale or timezone.",
+      "save_failed": "Could not save all settings. Your selections are retained; already applied changes remain saved."
+    },
     "language": {
       "display_language": {
         "de": "Deutsch",

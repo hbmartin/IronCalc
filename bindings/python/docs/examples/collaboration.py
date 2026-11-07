@@ -29,7 +29,7 @@ pending = alice.flush_send_queue()
 bob.pause_evaluation()
 try:
     bob.apply_external_diffs(pending)
-except Exception:
+except ic.WorkbookError:
     # This example knows the rejection is caused by Bob's paused evaluation.
     bob.resume_evaluation()
     bob.apply_external_diffs(pending)

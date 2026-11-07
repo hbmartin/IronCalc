@@ -1,12 +1,15 @@
 import { getAllTimezones, getSupportedLocales } from "@ironcalc/wasm";
 import { Check, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "../../Button/Button";
 import { IconButton } from "../../Button/IconButton";
 import "./regional-settings.css";
 import { Select } from "../../Select/Select";
-import type { RegionalSettingsSaveResult } from "./saveRegionalSettings";
+import type {
+  RegionalSettingsError,
+  RegionalSettingsSaveResult,
+} from "./saveRegionalSettings";
 
 type RegionalSettingsProps = {
   onClose: () => void;
@@ -90,9 +93,16 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
   const [selectedLanguage, setSelectedLanguage] = useState(
     properties.initialLanguage,
   );
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<RegionalSettingsError | null>(
+    null,
+  );
 
+  const preservePending = useRef(false);
   useEffect(() => {
+    if (preservePending.current) {
+      preservePending.current = false;
+      return;
+    }
     setSelectedLocale(properties.initialLocale);
     setSelectedTimezone(properties.initialTimezone);
     setSelectedLanguage(properties.initialLanguage);
@@ -109,6 +119,7 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
       selectedTimezone,
       selectedLanguage,
     );
+    preservePending.current = result.error !== null && result.changed;
     setSaveError(result.error);
     if (result.error === null) {
       properties.onClose();
@@ -209,7 +220,9 @@ const RegionalSettings = (properties: RegionalSettingsProps) => {
       <div className="ic-regional-settings-footer">
         {saveError !== null && (
           <div className="ic-regional-settings-error" role="alert">
-            {saveError}
+            {t(`regional_settings.errors.${saveError.code}`, {
+              value: saveError.value ?? "",
+            })}
           </div>
         )}
         <Button startIcon={<Check />} onClick={handleSave}>

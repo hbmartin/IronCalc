@@ -3259,7 +3259,7 @@ impl<'a> Model<'a> {
             if !this.can_clear_range(range)? {
                 return Err("Cannot clear the range because it contains array formulas".to_string());
             }
-            this.invalidate_calculation();
+            this.invalidate_clear(range)?;
             this.collapse_partially_cleared_spills(range)?;
             let sheet = range.sheet;
             let ws = this.workbook.worksheet_mut(sheet)?;
@@ -3291,6 +3291,26 @@ impl<'a> Model<'a> {
             });
             Ok(())
         })
+    }
+
+    fn invalidate_clear(&mut self, area: &Area) -> Result<(), String> {
+        let ws = self.workbook.worksheet(area.sheet)?;
+        let arrays = (area.row..area.row + area.height).any(|r| {
+            ws.sheet_data
+                .cells_in_row_between(r, area.column, area.column + area.width - 1)
+                .any(|(_, c)| matches!(&*c, Cell::ArrayFormula { .. } | Cell::SpillCell { .. }))
+        });
+        if !arrays
+            && self.evaluation.scalar_only == Some(true)
+            && (self.evaluation.report.converged || self.evaluation.incremental_after_clear)
+        {
+            self.evaluation.report = Default::default();
+            self.evaluation.incremental_after_clear = true;
+            self.evaluation.display.formatting_requested |= self.evaluation.display.edit_depth > 0;
+        } else {
+            self.invalidate_calculation();
+        }
+        Ok(())
     }
 
     // Returns true if for every array formula in the range, the whole spill is included in the range,
@@ -3365,7 +3385,7 @@ impl<'a> Model<'a> {
             if !this.can_clear_range(area)? {
                 return Err("Cannot clear the range because it contains array formulas".to_string());
             }
-            this.invalidate_calculation();
+            this.invalidate_clear(area)?;
             this.collapse_partially_cleared_spills(area)?;
             let worksheet = this.workbook.worksheet_mut(area.sheet)?;
 

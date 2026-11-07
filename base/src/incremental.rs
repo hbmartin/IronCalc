@@ -313,7 +313,7 @@ impl Model<'_> {
     ) -> Option<Vec<Key>> {
         let _clock = self.start_calculation_clock();
         if self.workbook.settings.iterative_calculation.enabled
-            || !self.evaluation.report.converged
+            || (!self.evaluation.report.converged && !self.evaluation.incremental_after_clear)
             || self.evaluation.scalar_only != Some(true)
             || self.evaluation.cells.is_empty()
             || !self.evaluation.circular.is_empty()
@@ -324,6 +324,7 @@ impl Model<'_> {
         if self.dependency_index.is_none() {
             self.build_dependency_index();
         }
+        self.evaluation.incremental_after_clear = false;
         let mut index = Arc::clone(self.dependency_index.as_ref()?);
         let structure_changed =
             edited.iter().any(

@@ -321,6 +321,14 @@
     "title": "Formato de número personalizado"
   },
   "regional_settings": {
+    "errors": {
+      "invalid_iteration": "Corrige la configuración del cálculo iterativo antes de cambiar la configuración regional o la zona horaria.",
+      "invalid_language": "Idioma de fórmulas no admitido: {{value}}",
+      "invalid_locale": "Configuración regional no admitida: {{value}}",
+      "invalid_timezone": "Zona horaria no admitida: {{value}}",
+      "paused": "Reanuda el cálculo antes de cambiar la configuración regional o la zona horaria.",
+      "save_failed": "No se pudieron guardar todos los ajustes. Se conservan tus selecciones; los cambios ya aplicados siguen guardados."
+    },
     "language": {
       "display_language": {
         "de": "Deutsch",

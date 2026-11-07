@@ -18,6 +18,30 @@ use crate::{
 
 use chrono::{Datelike, Duration, Months, NaiveDate};
 
+/// Keep the last complete overlay if rebuilding unwinds.
+struct FormattingUpdate<'s, 'a> {
+    model: &'s mut Model<'a>,
+    previous: Option<HashMap<(u32, i32, i32), Vec<CfCellResult>>>,
+}
+impl<'s, 'a> FormattingUpdate<'s, 'a> {
+    fn new(model: &'s mut Model<'a>) -> Self {
+        let previous = Some(std::mem::take(&mut model.cf_cache));
+        Self { model, previous }
+    }
+    fn complete(mut self) {
+        self.previous = None;
+        self.model.evaluation.display.formatting_recovery = false;
+    }
+}
+impl Drop for FormattingUpdate<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            self.model.cf_cache = previous;
+            self.model.evaluation.display.formatting_recovery = true;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Free helper functions for CF evaluation
 // ---------------------------------------------------------------------------
@@ -148,12 +172,12 @@ impl<'a> Model<'a> {
         {
             self.evaluation.cf_evaluations += 1;
         }
-        let _reads = self.start_stored_reads();
-        let _clock = self.start_formatting_clock();
-        self.cf_cache.clear();
-        let sheet_count = self.workbook.worksheets.len();
+        let update = FormattingUpdate::new(self);
+        let _reads = update.model.start_stored_reads();
+        let _clock = update.model.start_formatting_clock();
+        let sheet_count = update.model.workbook.worksheets.len();
         for sheet_idx in 0..sheet_count {
-            let mut cfs = self.workbook.worksheets[sheet_idx]
+            let mut cfs = update.model.workbook.worksheets[sheet_idx]
                 .conditional_formatting
                 .clone();
             // Lower priority number = higher priority; process high-priority first so that
@@ -164,12 +188,19 @@ impl<'a> Model<'a> {
                 if ranges.is_empty() {
                     continue;
                 }
-                self.apply_cf_rule(sheet_idx as u32, &cf.cf_rule, &ranges);
+                update
+                    .model
+                    .apply_cf_rule(sheet_idx as u32, &cf.cf_rule, &ranges);
+                #[cfg(test)]
+                if let Some(hook) = update.model.evaluation.display.cf_hook.take() {
+                    hook();
+                }
             }
         }
-        if self.evaluation.display_timestamp.is_none() {
-            self.record_display_timestamp();
+        if update.model.evaluation.display_timestamp.is_none() {
+            update.model.record_display_timestamp();
         }
+        update.complete();
     }
 
     // -----------------------------------------------------------------------
