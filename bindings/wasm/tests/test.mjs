@@ -41,6 +41,25 @@ test('date formulas use one instant per calculation and refresh later', () => {
     }
 });
 
+test('browser date conversion floors negative milliseconds to the previous second', () => {
+    const model = new Model('negative-clock', 'en', 'UTC', 'en');
+    model.pauseEvaluation();
+    const originalNow = Date.now;
+    try {
+        for (const [ms, seconds] of [[-1, -1], [-999, -1], [-1000, -1], [-1500, -2], [-2000, -2], [0, 0], [1, 0]]) {
+            Date.now = () => ms;
+            const expected = 25569 + seconds / 86400;
+            model.setUserInput(0, 1, 1, `=ABS(NOW()-(${expected}))<0.0000000001`);
+            model.setUserInput(0, 2, 1, `=TODAY()=${Math.floor(expected)}`);
+            model.evaluate();
+            assert.equal(model.getFormattedCellValue(0, 1, 1), 'TRUE', `${ms}: NOW`);
+            assert.equal(model.getFormattedCellValue(0, 2, 1), 'TRUE', `${ms}: TODAY`);
+        }
+    } finally {
+        Date.now = originalNow;
+    }
+});
+
 test('Frozen rows and columns', () => {
     let model = new Model('Workbook1', 'en', 'UTC', 'en');
     assert.strictEqual(model.getFrozenRowsCount(0), 0);

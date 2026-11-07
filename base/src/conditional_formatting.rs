@@ -135,9 +135,10 @@ impl<'a> Model<'a> {
     ///
     /// Iterates every worksheet's CF rules in priority order (lowest priority number,
     /// processed last). The result for each cell is stored in
-    /// `cf_cache` and consumed by `get_extended_style_for_cell`.
+    /// `cf_cache` and consumed by `get_extended_style_for_cell`. A standalone
+    /// redraw retains the displayed results' timestamp; it does not refresh time.
     pub fn evaluate_conditional_formatting(&mut self) {
-        let _clock = self.start_calculation_clock();
+        let _clock = self.start_formatting_clock();
         self.cf_cache.clear();
         let sheet_count = self.workbook.worksheets.len();
         for sheet_idx in 0..sheet_count {
@@ -155,6 +156,7 @@ impl<'a> Model<'a> {
                 self.apply_cf_rule(sheet_idx as u32, &cf.cf_rule, &ranges);
             }
         }
+        self.evaluation.display_timestamp = Some(self.calculation_timestamp_ms());
     }
 
     // -----------------------------------------------------------------------

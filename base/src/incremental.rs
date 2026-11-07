@@ -31,18 +31,16 @@ pub(crate) struct DependencyIndex {
     has_arrays: bool,
 }
 fn is_volatile(kind: &Function) -> bool {
-    matches!(
-        kind,
-        Function::Now
-            | Function::Today
-            | Function::Rand
-            | Function::Randbetween
-            | Function::Randarray
-            | Function::Indirect
-            | Function::Offset
-            | Function::Cell
-            | Function::Info
-    )
+    kind.is_random()
+        || matches!(
+            kind,
+            Function::Now
+                | Function::Today
+                | Function::Indirect
+                | Function::Offset
+                | Function::Cell
+                | Function::Info
+        )
 }
 
 /// Collects what a formula at `cell` refers to. Returns true when the
@@ -303,7 +301,9 @@ impl Model<'_> {
     pub fn evaluate_incremental(&mut self, edited: &[(u32, i32, i32)]) -> Option<Vec<Key>> {
         let _clock = self.start_calculation_clock();
         let changed = self.evaluate_incremental_headless(edited);
-        self.evaluate_conditional_formatting();
+        if self.evaluation.report.failure != Some(CalculationFailure::InvalidSettings) {
+            self.evaluate_conditional_formatting();
+        }
         changed
     }
 
@@ -413,6 +413,7 @@ impl Model<'_> {
             failure: None::<CalculationFailure>,
         };
         self.dependency_index = Some(index);
+        self.evaluation.display_timestamp = Some(self.calculation_timestamp_ms());
         Some(dirty)
     }
 }

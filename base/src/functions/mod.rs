@@ -2307,6 +2307,13 @@ impl Function {
     pub(crate) fn returns_reference(&self) -> bool {
         matches!(self, Function::Indirect | Function::Offset)
     }
+
+    pub(crate) fn is_random(&self) -> bool {
+        matches!(
+            self,
+            Function::Rand | Function::Randbetween | Function::Randarray
+        )
+    }
 }
 
 impl<'a> Model<'a> {
@@ -2319,12 +2326,7 @@ impl<'a> Model<'a> {
         if self.evaluation.unwinding || self.evaluation.restart.is_some() {
             return CalcResult::EmptyCell;
         }
-        if self.evaluation.iterating
-            && matches!(
-                kind,
-                Function::Rand | Function::Randbetween | Function::Randarray
-            )
-        {
+        if self.evaluation.iterating && kind.is_random() {
             self.evaluation
                 .random_cells
                 .insert((cell.sheet, cell.row, cell.column));

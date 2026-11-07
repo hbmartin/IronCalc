@@ -20,7 +20,7 @@ pub fn get_all_timezone_names() -> Vec<String> {
 
 pub(crate) fn excel_serial_for_timestamp(tz: &Tz, milliseconds: i64) -> Option<f64> {
     use chrono::{DateTime, Datelike, Timelike};
-    let seconds = milliseconds / 1000;
+    let seconds = milliseconds.div_euclid(1000);
     DateTime::from_timestamp(seconds, 0).map(|dt| {
         let local = dt.with_timezone(&tz.0);
         let days = local.num_days_from_ce() - EXCEL_DATE_BASE;
