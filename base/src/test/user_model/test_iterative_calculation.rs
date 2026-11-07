@@ -89,14 +89,17 @@ fn settings_and_history_respect_paused_evaluation() {
     m.set_user_input(0, 1, 1, "=A1/2+10").unwrap();
     m.pause_evaluation();
     m.set_iterative_calculation(true, 100, 1e-9).unwrap();
+    assert!(!m.model.evaluation_report().converged);
     assert_eq!(m.model.evaluation_report().iterations, 0);
     assert_eq!(m.get_formatted_cell_value(0, 1, 1).unwrap(), "#CIRC!");
     m.evaluate();
     assert_close(value(&m, 1, 1), 20.0);
     m.undo().unwrap();
+    assert!(!m.model.evaluation_report().converged);
     assert_eq!(m.model.evaluation_report().iterations, 0);
     assert_close(value(&m, 1, 1), 20.0);
     m.redo().unwrap();
+    assert!(!m.model.evaluation_report().converged);
     assert_eq!(m.model.evaluation_report().iterations, 0);
     m.resume_evaluation();
     m.undo().unwrap();
