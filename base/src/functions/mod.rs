@@ -2322,15 +2322,11 @@ impl<'a> Model<'a> {
         if self.evaluation.iterating
             && matches!(
                 kind,
-                Function::Rand
-                    | Function::Randbetween
-                    | Function::Randarray
-                    | Function::Now
-                    | Function::Today
+                Function::Rand | Function::Randbetween | Function::Randarray
             )
         {
             self.evaluation
-                .time_or_random
+                .random_cells
                 .insert((cell.sheet, cell.row, cell.column));
         }
         match kind {

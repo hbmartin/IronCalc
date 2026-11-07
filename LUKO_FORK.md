@@ -13,6 +13,28 @@ Iteration counts range from 1 to 32,767. Tolerances must be finite and nonnegati
 zero requires exact numeric equality, and positive tolerances require a strictly
 smaller numeric change. Every iterative calculation starts from zero.
 
+Circular calculations require at least two completed passes by default, so the
+first pass establishes a baseline. `maximum_iterations` remains the total pass
+budget: a cycle with a one-pass budget reports `IterationLimit`, while acyclic
+workbooks still succeed in one pass. Every current cycle participant needs a
+comparison value from the preceding completed pass.
+
+Use `set_require_two_iterative_passes(false)` to restore first-pass comparison
+with zero; `get_require_two_iterative_passes()` reads the option. Rust and Python
+use these names, while JavaScript uses `setRequireTwoIterativePasses` and
+`getRequireTwoIterativePasses`. The switch is local runtime configuration: forks
+inherit it, structural changes and history retain it, and loading a workbook
+resets it to true. It is absent from workbook serialization, undo history, and
+collaboration diffs. Raw Model changes invalidate the report without calculating;
+UserModel changes calculate once unless paused. Setting the same value is a no-op.
+
+Convergence means the configured change threshold was met, not that a
+mathematical limit has been established. For `A1=A1+0.0001` and tolerance `0.001`,
+the default mode succeeds on pass two (value `0.0002`), and legacy comparison
+succeeds on pass one (value `0.0001`). A tighter or zero tolerance makes that
+example exhaust its pass budget. The first-pass residual remains the change
+from the zero seed, even when that pass cannot establish convergence.
+
 Scalar numeric and Boolean cycles are supported, including 1×1 dynamic anchors
 produced by defined names, INDEX, LET, INDIRECT and LAMBDA. Boolean values must
 match exactly, independently of tolerance; numeric/Boolean transitions require
@@ -27,12 +49,21 @@ following an unsuccessful report performs full evaluation before reporting a new
 result. Ordinary spreadsheet errors remain cell values; a successful report is
 not a guarantee that every cell is error-free.
 
-Only executed time/random calls feeding a runtime cycle cause `VolatileCycle`.
-Unrelated or downstream-only volatile formulas, inactive branches, unused named
-functions and deleted formulas do not block convergence. RAND, RANDBETWEEN,
-RANDARRAY, NOW and TODAY are not frozen between passes. Runtime dependency
-tracking includes cached reads, ranges and spill anchors; abandoned passes do
-not contribute dependencies or failure diagnostics.
+Only executed RAND, RANDBETWEEN and RANDARRAY calls feeding a runtime cycle cause
+`VolatileCycle`. Random values are not frozen. Unrelated or downstream-only
+volatile formulas, inactive branches, unused named functions and deleted
+formulas do not block convergence. Runtime dependency tracking includes cached
+reads, ranges and spill anchors; abandoned passes do not contribute dependencies
+or failure diagnostics.
+
+TODAY and NOW use one timestamp captured at the outermost calculation entry.
+Every iterative pass, spill restart, cell replay, incremental fallback and
+conditional-format evaluation belonging to that calculation shares the same
+instant, converted using each function's requested timezone. Date-dependent
+cycles can therefore converge. Later full or incremental calculations capture a
+fresh timestamp; forks begin without an active timestamp. This is per calculation,
+not per simulation run. Native and browser implementations preserve the existing
+second precision. TODAY and NOW remain volatile for incremental invalidation.
 
 XLSX import preserves valid iteration settings, including zero tolerance. When
 iteration is disabled, malformed/out-of-range fields individually default to
@@ -68,6 +99,33 @@ budget also applies and may stop recursion sooner. Cell chains unwind/replay;
 a LAMBDA that cannot fit within a single cell's budget returns `#NUM!` and
 `RecursionLimit`. Raising the depth ceiling alone does not increase the byte
 budget. Size both limits for the worker's actual stack and build profile.
+Defaults remain 256 LAMBDA calls and a 256 KiB evaluation stack budget. Stored
+`#NUM!` errors identify either the configured call-depth limit or the configured
+stack-byte budget; the report retains `RecursionLimit` for both.
+
+An explicit native configuration tested with `FACTORIAL(70)` is:
+
+```rust
+let worker = std::thread::Builder::new()
+    .stack_size(32 * 1024 * 1024)
+    .spawn(|| {
+        let mut model = ironcalc_base::Model::new_empty("model", "en", "UTC", "en")
+            .unwrap();
+        model.set_max_evaluation_stack(8 * 1024 * 1024);
+        // Keep the default 256-call LAMBDA ceiling.
+        model.new_defined_name(
+            "FACTORIAL", None, "LAMBDA(n,IF(n=0,1,n*FACTORIAL(n-1)))"
+        ).unwrap();
+        model.set_user_input(0, 1, 1, "=FACTORIAL(70)".into()).unwrap();
+        model.evaluate_headless();
+        assert!(model.evaluation_report().converged);
+    }).unwrap();
+worker.join().unwrap();
+```
+
+This does not increase engine defaults or application worker stacks. Resource
+limit configuration remains a Rust API; binding additions cover the comparison
+switch only.
 
 The public Model iteration setter still evaluates immediately. UserModel
 setting changes and undo/redo respect paused evaluation and evaluate at most

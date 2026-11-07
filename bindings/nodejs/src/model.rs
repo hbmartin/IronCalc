@@ -22,6 +22,18 @@ pub struct Model {
 
 #[napi]
 impl Model {
+  /// Require two completed passes for circular convergence (default true).
+  /// Local runtime configuration; not serialized or added to undo history.
+  #[napi]
+  pub fn set_require_two_iterative_passes(&mut self, required: bool) {
+    self.model.set_require_two_iterative_passes(required);
+  }
+
+  /// Whether circular convergence requires two completed passes.
+  #[napi]
+  pub fn get_require_two_iterative_passes(&self) -> bool {
+    self.model.get_require_two_iterative_passes()
+  }
   /// Creates an empty workbook. `locale`, `timezone` and `languageId` default
   /// to "en", "UTC" and "en".
   #[napi(constructor)]

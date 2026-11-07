@@ -137,6 +137,7 @@ impl<'a> Model<'a> {
     /// processed last). The result for each cell is stored in
     /// `cf_cache` and consumed by `get_extended_style_for_cell`.
     pub fn evaluate_conditional_formatting(&mut self) {
+        let _clock = self.start_calculation_clock();
         self.cf_cache.clear();
         let sheet_count = self.workbook.worksheets.len();
         for sheet_idx in 0..sheet_count {
@@ -881,7 +882,10 @@ impl<'a> Model<'a> {
         stop_if_true: bool,
         ranges: &[(i32, i32, i32, i32)],
     ) {
-        let today_serial = match crate::tz::excel_serial_for_now(&self.tz) {
+        let today_serial = match crate::tz::excel_serial_for_timestamp(
+            &self.tz,
+            self.calculation_timestamp_ms(),
+        ) {
             Some(s) => s.floor() as i64,
             None => return,
         };

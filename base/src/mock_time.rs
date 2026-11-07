@@ -14,11 +14,50 @@ thread_local! {
 }
 
 pub fn get_milliseconds_since_epoch() -> i64 {
-    MOCK_TIME.with(|t| *t.borrow())
+    MOCK_TIME.with(|t| {
+        let now = *t.borrow();
+        #[cfg(test)]
+        {
+            MOCK_STEP.with(|step| *t.borrow_mut() += step.get());
+            MOCK_READS.with(|reads| reads.set(reads.get() + 1));
+        }
+        now
+    })
 }
 
 pub fn set_mock_time(time: i64) {
     MOCK_TIME.with(|cell| *cell.borrow_mut() = time);
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOCK_STEP: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    static MOCK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn clock_reads() -> usize {
+    MOCK_READS.with(std::cell::Cell::get)
+}
+
+/// Advance after every read, restoring the thread's clock even if a test panics.
+#[cfg(test)]
+pub(crate) fn with_advancing_time<T>(start: i64, step: i64, test: impl FnOnce() -> T) -> T {
+    struct Restore(i64, i64, usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_mock_time(self.0);
+            MOCK_STEP.with(|step| step.set(self.1));
+            MOCK_READS.with(|reads| reads.set(self.2));
+        }
+    }
+    let _restore = Restore(
+        MOCK_TIME.with(|time| *time.borrow()),
+        MOCK_STEP.with(|value| value.replace(step)),
+        MOCK_READS.with(|value| value.replace(0)),
+    );
+    set_mock_time(start);
+    test()
 }
 
 #[cfg(test)]

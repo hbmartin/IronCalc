@@ -442,6 +442,13 @@ export interface IronCalcTheme {
  */
 export declare class Model {
   /**
+   * Require two completed passes for circular convergence (default true).
+   * Local runtime configuration; not serialized or added to undo history.
+   */
+  setRequireTwoIterativePasses(required: boolean): void
+  /** Whether circular convergence requires two completed passes. */
+  getRequireTwoIterativePasses(): boolean
+  /**
    * Creates an empty workbook. `locale`, `timezone` and `languageId` default
    * to "en", "UTC" and "en".
    */
@@ -605,6 +612,13 @@ export declare class Model {
  * undo/redo history and produces diffs for collaboration.
  */
 export declare class UserModel {
+  /**
+   * Require two completed passes for circular convergence (default true).
+   * Local runtime configuration; not serialized or added to undo history.
+   */
+  setRequireTwoIterativePasses(required: boolean): void
+  /** Whether circular convergence requires two completed passes. */
+  getRequireTwoIterativePasses(): boolean
   /**
    * Creates an empty workbook. `locale`, `timezone` and `languageId` default
    * to "en", "UTC" and "en".

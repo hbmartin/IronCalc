@@ -2,6 +2,8 @@ name: Calculation fork
 on:
   push:
     branches: [luko-simulation]
+  pull_request:
+    branches: [luko-simulation]
   workflow_dispatch:
 permissions:
   contents: read

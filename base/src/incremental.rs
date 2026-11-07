@@ -301,6 +301,7 @@ impl Model<'_> {
     /// Direct workbook mutations still require a full evaluation.
     /// `None` means a safe full recalculation was performed.
     pub fn evaluate_incremental(&mut self, edited: &[(u32, i32, i32)]) -> Option<Vec<Key>> {
+        let _clock = self.start_calculation_clock();
         let changed = self.evaluate_incremental_headless(edited);
         self.evaluate_conditional_formatting();
         changed
@@ -312,6 +313,7 @@ impl Model<'_> {
         &mut self,
         edited: &[(u32, i32, i32)],
     ) -> Option<Vec<Key>> {
+        let _clock = self.start_calculation_clock();
         if self.workbook.settings.iterative_calculation.enabled
             || !self.evaluation.report.converged
             || self.evaluation.scalar_only != Some(true)

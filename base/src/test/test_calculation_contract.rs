@@ -18,6 +18,48 @@ fn sumto(model: &mut Model) {
 }
 
 #[test]
+fn new_and_loaded_models_require_evaluation_before_convergence() {
+    let mut model = new_empty_model();
+    assert!(!model.evaluation_report().converged);
+    assert_eq!(model.evaluation_report().iterations, 0);
+    assert_eq!(model.evaluation_report().failure, None);
+
+    model._set("A1", "=21*2");
+    model.evaluate_headless();
+    assert!(model.evaluation_report().converged);
+    assert_eq!(number(&model, "A1"), 42.0);
+
+    let bytes = model.to_bytes();
+    let mut restored = Model::from_bytes(&bytes, "en").unwrap();
+    assert!(!restored.evaluation_report().converged);
+    assert_eq!(restored.evaluation_report().iterations, 0);
+    assert_eq!(restored.evaluation_report().failure, None);
+
+    restored.evaluate_headless();
+    assert!(restored.evaluation_report().converged);
+    assert_eq!(restored.evaluation_report().iterations, 1);
+    assert_eq!(number(&restored, "A1"), 42.0);
+}
+
+#[test]
+fn invalidated_models_require_reevaluation_before_convergence() {
+    let mut model = new_empty_model();
+    model._set("A1", "=21*2");
+    model.evaluate_headless();
+    assert!(model.evaluation_report().converged);
+
+    model.insert_rows(0, 1, 1).unwrap();
+    assert!(!model.evaluation_report().converged);
+    assert_eq!(model.evaluation_report().iterations, 0);
+    assert_eq!(model.evaluation_report().failure, None);
+
+    model.evaluate_headless();
+    assert!(model.evaluation_report().converged);
+    assert_eq!(model.evaluation_report().iterations, 1);
+    assert_eq!(number(&model, "A2"), 42.0);
+}
+
+#[test]
 fn scalar_dynamic_cycles_converge() {
     for formula in [
         "=A1*Rate+10",
@@ -262,8 +304,6 @@ fn unrelated_and_inactive_volatility_does_not_block_cycles() {
 fn volatility_reaches_cycles_through_actual_dependencies() {
     for source in [
         "=RAND()",
-        "=TODAY()",
-        "=NOW()",
         "=RANDBETWEEN(1,9)",
         "=RANDARRAY(1)",
         "=SAMPLE(1)",

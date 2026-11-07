@@ -1,8 +1,45 @@
 import test from 'node:test';
 import assert from 'node:assert'
+import { readFileSync } from 'node:fs';
 import { Model } from "../pkg-nodejs/wasm.js";
 
 const DEFAULT_ROW_HEIGHT = 25;
+
+test('two-pass option defaults on, toggles, and resets on reload', () => {
+    const model = new Model('comparison', 'en', 'UTC', 'en');
+    assert.equal(model.getRequireTwoIterativePasses(), true);
+    model.setRequireTwoIterativePasses(false);
+    assert.equal(model.getRequireTwoIterativePasses(), false);
+    const restored = Model.fromBytes(model.toBytes(), 'en');
+    assert.equal(restored.getRequireTwoIterativePasses(), true);
+    model.setRequireTwoIterativePasses(true);
+    assert.equal(model.getRequireTwoIterativePasses(), true);
+    assert.equal(model.canUndo(), false);
+    const declarations = readFileSync(new URL('../pkg-nodejs/wasm.d.ts', import.meta.url), 'utf8');
+    assert.match(declarations, /setRequireTwoIterativePasses\(required: boolean\): void/);
+    assert.match(declarations, /getRequireTwoIterativePasses\(\): boolean/);
+});
+
+test('date formulas use one instant per calculation and refresh later', () => {
+    const model = new Model('clock', 'en', 'UTC', 'en');
+    model.pauseEvaluation();
+    model.setUserInput(0, 1, 1, '=NOW()');
+    model.setUserInput(0, 2, 1, '=NOW()');
+    const originalNow = Date.now;
+    let reads = 0;
+    Date.now = () => 1679356799000 + reads++ * 86400000;
+    try {
+        model.evaluate();
+        const first = model.getFormattedCellValue(0, 1, 1);
+        assert.equal(model.getFormattedCellValue(0, 2, 1), first);
+        assert.equal(reads, 1);
+        model.evaluate();
+        assert.notEqual(model.getFormattedCellValue(0, 1, 1), first);
+        assert.equal(reads, 2);
+    } finally {
+        Date.now = originalNow;
+    }
+});
 
 test('Frozen rows and columns', () => {
     let model = new Model('Workbook1', 'en', 'UTC', 'en');

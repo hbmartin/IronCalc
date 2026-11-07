@@ -74,8 +74,7 @@ pub fn get_all_timezone_names() -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn excel_serial_for_now(tz: &Tz) -> Option<f64> {
-    let ms = crate::model::get_milliseconds_since_epoch();
+pub(crate) fn excel_serial_for_timestamp(tz: &Tz, ms: i64) -> Option<f64> {
     let parts = js::ic_tz_parts(ms as f64, &tz.0);
     if parts.length() != 6 {
         return None;

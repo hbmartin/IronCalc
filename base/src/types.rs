@@ -142,6 +142,9 @@ impl IterativeCalculation {
 
 /// The outcome of a calculation, independent of individual spreadsheet values.
 /// A caller saving simulation results must reject a report with `converged=false`.
+/// Before evaluation or after invalidation, `converged=false` and `iterations=0`.
+/// Success means the configured successive-change test passed; small steady
+/// drift can satisfy a positive tolerance. It is not proof of a mathematical limit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CalculationReport {
     pub converged: bool,
@@ -155,7 +158,7 @@ pub struct CalculationReport {
 impl Default for CalculationReport {
     fn default() -> Self {
         Self {
-            converged: true,
+            converged: false,
             iterations: 0,
             residual: 0.0,
             had_circular_references: false,

@@ -120,6 +120,18 @@ pub struct Model {
 
 #[wasm_bindgen]
 impl Model {
+    /// Require two completed passes for circular convergence (default true).
+    /// Local runtime configuration; not serialized or added to undo history.
+    #[wasm_bindgen(js_name = "setRequireTwoIterativePasses")]
+    pub fn set_require_two_iterative_passes(&mut self, required: bool) {
+        self.model.set_require_two_iterative_passes(required);
+    }
+
+    /// Whether circular convergence requires two completed passes.
+    #[wasm_bindgen(js_name = "getRequireTwoIterativePasses")]
+    pub fn get_require_two_iterative_passes(&self) -> bool {
+        self.model.get_require_two_iterative_passes()
+    }
     #[wasm_bindgen(constructor)]
     pub fn new(
         name: &str,
