@@ -9,6 +9,13 @@ use super::row::Row;
 use crate::constants::LAST_ROW;
 use crate::{display::MutationObserver, types::Cell};
 
+#[cfg(test)]
+thread_local! {static CELL_VISITS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};}
+#[cfg(test)]
+fn visit_cell() {
+    CELL_VISITS.with(|count| count.set(count.get() + 1));
+}
+
 const CHUNK_BITS: u32 = 10;
 const CHUNK_ROWS: usize = 1 << CHUNK_BITS;
 const CHUNK_MASK: usize = CHUNK_ROWS - 1;
@@ -62,6 +69,10 @@ fn locate(row: i32) -> Option<(usize, usize)> {
 impl SheetData {
     pub fn new() -> Self {
         Self::default()
+    }
+    #[cfg(test)]
+    pub(crate) fn cell_visits() -> usize {
+        CELL_VISITS.with(std::cell::Cell::get)
     }
 
     pub(crate) fn observe(&mut self, observer: MutationObserver) {
@@ -129,6 +140,8 @@ impl SheetData {
     /// The cell at a position, if there is one.
     #[inline]
     pub fn cell(&self, row: i32, column: i32) -> Option<Cow<'_, Cell>> {
+        #[cfg(test)]
+        visit_cell();
         self.row(row)?.get(column)
     }
 
@@ -164,9 +177,11 @@ impl SheetData {
     /// by row, and within a row by column.
     pub fn cells(&self) -> impl Iterator<Item = (i32, i32, Cow<'_, Cell>)> {
         self.rows_in_order().flat_map(|(row, row_data)| {
-            row_data
-                .iter()
-                .map(move |(column, cell)| (row, column, cell))
+            row_data.iter().map(move |(column, cell)| {
+                #[cfg(test)]
+                visit_cell();
+                (row, column, cell)
+            })
         })
     }
 
@@ -205,6 +220,10 @@ impl SheetData {
             .into_iter()
             .flatten()
             .take_while(move |(column, _)| *column <= last_column)
+            .inspect(|_| {
+                #[cfg(test)]
+                visit_cell();
+            })
     }
 
     /// The numbers of a row from `first_column` to `last_column`, both

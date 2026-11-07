@@ -109,9 +109,35 @@ remain unchanged. These are retained results, not a successful new calculation.
 
 Local undo/redo keeps sparse runtime display deltas alongside existing history,
 restoring cached values, spills and dynamic links without calculation. The deltas
-are not serialized or sent to collaborators. External diffs preserve available
-state but cannot restore runtime metadata absent from their payload; calculation
-recreates it. Deleted or replaced formulas lose their associated runtime links.
+are not serialized or sent to collaborators. A runtime cell-storage journal
+captures each touched position before its first write and remains active through
+the final calculation, including spill restarts and failed convergence. Routine
+edits inspect only these positions when building history, rather than copying
+the workbook before and after every edit. Structural remapping retains its
+broader snapshots. Journals do not affect encoded bytes or equality, and clones,
+loads and forks start without active observation.
+
+External diffs preserve available state but cannot restore runtime metadata
+absent from their payload; calculation recreates it. Explicit remote writes
+retire conflicting display supplements from both local history stacks, including
+spill owners/children and dynamic links; unrelated supplements and ordinary undo
+entries survive. Same-text formula replacement still changes ownership.
+Structural remote edits retire supplements on affected sheets and sheets with
+rewritten formulas; global calculation-context and defined-name changes retire
+all display supplements. This does not rebase encoded collaborative history.
+Deleted or replaced formulas lose their associated runtime links.
+
+Clipboard paste validates its source/destination, CSE restrictions, merge
+footprint, finite inputs and formula/name/formatting rewrites before entering a
+mutating edit scope. Rejected pastes preserve saved bytes, cached values, spills,
+links, formatting, reports, dependency state, clocks, selection, history and
+queues. Successful paste publishes its history after the prepared operations and
+selection are applied. Invalid translated merges remain skipped. Nonpositive
+row/column moves and zero displacements are no-ops before display remapping.
+Partial-spill clearing finds owners through affected spill cells, without a
+full-sheet scan. `display_edit_benchmark` measures paused population and large
+cuts in release mode; CI uses deterministic touched-position/owner-visit counts
+rather than timing thresholds.
 
 Changed timezone/locale setters reject enabled-invalid iteration settings before
 mutation; UserModel also rejects these changes while paused. Rejection leaves
