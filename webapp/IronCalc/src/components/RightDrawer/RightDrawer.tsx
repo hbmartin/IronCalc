@@ -10,6 +10,7 @@ import ConditionalFormatting from "./ConditionalFormatting/ConditionalFormatting
 import NamedRanges from "./NamedRanges/NamedRanges";
 import NamedStylesPanel from "./NamedStyles/NamedStylesPanel";
 import RegionalSettings from "./RegionalSettings/RegionalSettings";
+import type { RegionalSettingsSaveResult } from "./RegionalSettings/saveRegionalSettings";
 import Themes from "./Themes/themes";
 import "./rightdrawer.css";
 import { useTranslation } from "react-i18next";
@@ -60,7 +61,11 @@ interface RightDrawerProps {
   initialLocale: string;
   initialTimezone: string;
   initialLanguage: string;
-  onSettingsSave: (locale: string, timezone: string, language: string) => void;
+  onSettingsSave: (
+    locale: string,
+    timezone: string,
+    language: string,
+  ) => RegionalSettingsSaveResult;
 }
 
 const RightDrawer = ({
