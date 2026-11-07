@@ -117,6 +117,29 @@ the workbook before and after every edit. Structural remapping retains its
 broader snapshots. Journals do not affect encoded bytes or equality, and clones,
 loads and forks start without active observation.
 
+Structural remapping and cell movement mark replay-sensitive journal writes.
+Their display entries are retained even when the cached payload at a position
+compares equal: undo/redo first moves cells, so position equality alone cannot
+identify redundant history. Ordinary edits still omit equal payloads. Merge
+operations transfer cached formula results and dynamic links to their anchor;
+paused autofill marks calculation out of date without running a pass.
+
+Display supplements share immutable storage across undo/redo. Remote conflict
+pruning uses copy-on-write, preserving exact volatile results without copying
+their vectors each time an entry changes stacks. History remains unbounded.
+Edit guards own their mutable borrow through final calculation and publication.
+If an edit panics, unwinding releases nesting, pending effects and observers and
+marks calculation out of date. This cleanup does not roll back partial mutations
+or run calculation/formatting; ordinary validation errors retain their existing
+atomicity guarantees.
+
+Calculation and formatting requests are separate. Rule changes refresh formatting
+without invalidating reports or dependencies, including during local history and
+external replay. Width, height, ordinary style, gridline and frozen-pane edits do
+not reevaluate rules. Theme changes refresh theme-dependent overlays. Relevant
+nested edits refresh formatting once at the outermost boundary, and explicit
+calculation still refreshes formatting even when settings are invalid.
+
 External diffs preserve available state but cannot restore runtime metadata
 absent from their payload; calculation recreates it. Explicit remote writes
 retire conflicting display supplements from both local history stacks, including
@@ -145,6 +168,15 @@ context, results, display state, history and queues untouched, including through
 undo/redo and external batches. Unchanged settings are no-ops. A successful
 unpaused context change calculates once, including calculations that complete
 with nonconvergence. Resuming automatic evaluation does not itself calculate.
+
+Flushing outgoing diffs is not an acknowledgement of delivery. Callers retain
+the bytes until the receiver applies them successfully. A rejected incoming
+context batch applies nothing and is not queued internally; retry the same bytes
+after resuming evaluation or repairing settings, preserving delivery order.
+The regional-settings drawer validates selections before invoking setters and
+keeps the drawer and selections open with an inline error after rejection.
+Unchanged selections skip setters, and language-only changes remain available
+when evaluation is paused.
 
 XLSX import preserves valid iteration settings, including zero tolerance. When
 iteration is disabled, malformed/out-of-range fields individually default to

@@ -413,6 +413,9 @@ impl<'a> UserModel<'a> {
 
     /// Returns the list of pending diffs and removes them from the queue
     ///
+    /// This is not a delivery acknowledgement. Retain the returned bytes until
+    /// the receiving model successfully applies them; an error requires retry.
+    ///
     /// This is used together with [apply_external_diffs](UserModel::apply_external_diffs) to keep two remote models
     /// in sync.
     ///
@@ -426,6 +429,11 @@ impl<'a> UserModel<'a> {
     }
 
     /// This are external diffs that need to be applied to the model
+    ///
+    /// Context-changing batches are rejected atomically while evaluation is
+    /// paused or their ordered transitions encounter invalid iteration settings.
+    /// The caller owns the payload and must retain it for retry after resolving
+    /// the rejection. This model does not queue rejected batches internally.
     ///
     /// This is used together with [flush_send_queue](UserModel::flush_send_queue) to keep two remote models in sync
     ///

@@ -23,3 +23,6 @@ pub use clipboard::ClipboardData;
 pub use common::BorderArea;
 
 mod display;
+#[cfg(test)]
+#[path = "../test/test_display_replay.rs"]
+mod display_replay_tests;

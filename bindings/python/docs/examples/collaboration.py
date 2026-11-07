@@ -22,4 +22,17 @@ bob.set_user_input(0, 3, 1, "=SUM(A1:A2)")
 alice.apply_external_diffs(bob.flush_send_queue())
 
 assert alice.get_formatted_cell_value(0, 3, 1) == "300"
+
+# Flushing does not acknowledge delivery. Keep this payload until Bob accepts it.
+alice.set_timezone("Europe/Paris")
+pending = alice.flush_send_queue()
+bob.pause_evaluation()
+try:
+    bob.apply_external_diffs(pending)
+except Exception:
+    # This example knows the rejection is caused by Bob's paused evaluation.
+    bob.resume_evaluation()
+    bob.apply_external_diffs(pending)
+# Only discard pending after successful application; send later batches in order.
+assert bob.get_timezone() == "Europe/Paris"
 print("both models in sync")
