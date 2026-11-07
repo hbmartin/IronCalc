@@ -8,7 +8,10 @@ impl UserModel<'_> {
         edit: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
         let outermost = self.model.evaluation.display.edit_depth == 0;
-        let before = (outermost && record).then(|| self.model.display_snapshot());
+        let journaled = outermost && record;
+        if journaled {
+            self.model.start_display_journal();
+        }
         let entries = self.history.undo_stack.len();
         self.model.begin_display_edit();
         let result = edit(self);
@@ -17,9 +20,9 @@ impl UserModel<'_> {
         } else {
             self.model.cancel_display_edit();
         }
-        if self.history.undo_stack.len() > entries {
-            if let Some(before) = before {
-                let difference = before.difference(self.model.display_snapshot());
+        if journaled {
+            let difference = self.model.take_display_journal();
+            if self.history.undo_stack.len() > entries {
                 if let Some(entry) = self.history.undo_stack.last_mut() {
                     entry.display = difference;
                 }

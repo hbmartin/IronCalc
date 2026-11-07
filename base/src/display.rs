@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -13,13 +13,18 @@ use crate::{
     Model,
 };
 
-type Position = (u32, i32, i32);
+pub(crate) type Position = (u32, i32, i32);
 
 #[derive(Default)]
 pub(crate) struct DisplayState {
     pub(crate) edit_depth: usize,
     pub(crate) calculation_requested: bool,
     stored_reads: Arc<AtomicBool>,
+    journal: Option<Arc<Mutex<MutationJournal>>>,
+    #[cfg(test)]
+    pub(crate) journal_positions: usize,
+    #[cfg(test)]
+    pub(crate) spill_owner_visits: usize,
 }
 
 pub(crate) struct StoredReadsGuard(Arc<AtomicBool>, bool);
@@ -35,6 +40,52 @@ pub(crate) enum CachedCell {
     Spill(Cell),
 }
 
+/// One original image per touched position, shared by participating worksheets.
+#[derive(Default, Debug)]
+pub(crate) struct MutationJournal {
+    cells: HashMap<Position, Option<CachedCell>>,
+    links: HashMap<Position, Option<Link>>,
+}
+
+/// Cloning worksheet data never carries observation into the clone.
+#[derive(Default, Debug)]
+pub(crate) struct MutationObserver {
+    sheet_id: u32,
+    journal: Option<Arc<Mutex<MutationJournal>>>,
+}
+impl Clone for MutationObserver {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+impl MutationObserver {
+    pub(crate) fn active(&self) -> bool {
+        self.journal.is_some()
+    }
+    pub(crate) fn capture(&self, row: i32, column: i32, cell: Option<&Cell>) {
+        if let Some(journal) = &self.journal {
+            journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cells
+                .entry((self.sheet_id, row, column))
+                .or_insert_with(|| cell.and_then(CachedCell::of));
+        }
+    }
+}
+impl CachedCell {
+    fn of(cell: &Cell) -> Option<Self> {
+        match cell {
+            Cell::CellFormula { v, .. } => Some(Self::Formula(v.clone(), None)),
+            Cell::ArrayFormula { v, r, kind, .. } => {
+                Some(Self::Formula(v.clone(), Some((kind.clone(), *r))))
+            }
+            Cell::SpillCell { .. } => Some(Self::Spill(cell.clone())),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct DisplaySnapshot {
     // Sheet ids, rather than vector indices, survive sheet reordering and deletion.
@@ -48,31 +99,6 @@ pub(crate) struct DisplayDelta {
     links: Vec<(Position, Option<Link>, Option<Link>)>,
 }
 
-fn delta<T: Clone + PartialEq>(
-    before: HashMap<Position, T>,
-    after: HashMap<Position, T>,
-) -> Vec<(Position, Option<T>, Option<T>)> {
-    let mut after = after;
-    let mut result = Vec::new();
-    for (key, old) in before {
-        let new = after.remove(&key);
-        if new.as_ref() != Some(&old) {
-            result.push((key, Some(old), new));
-        }
-    }
-    result.extend(after.into_iter().map(|(key, new)| (key, None, Some(new))));
-    result
-}
-
-impl DisplaySnapshot {
-    pub(crate) fn difference(self, after: Self) -> DisplayDelta {
-        DisplayDelta {
-            cells: delta(self.cells, after.cells),
-            links: delta(self.links, after.links),
-        }
-    }
-}
-
 impl Model<'_> {
     pub(crate) fn reading_stored_values(&self) -> bool {
         self.evaluation.display.stored_reads.load(Ordering::Relaxed)
@@ -83,6 +109,121 @@ impl Model<'_> {
         let flag = Arc::clone(&self.evaluation.display.stored_reads);
         let previous = flag.swap(true, Ordering::Relaxed);
         StoredReadsGuard(flag, previous)
+    }
+
+    pub(crate) fn start_display_journal(&mut self) {
+        debug_assert!(self.evaluation.display.journal.is_none());
+        let journal = Arc::new(Mutex::new(MutationJournal::default()));
+        for ws in &mut self.workbook.worksheets {
+            ws.sheet_data.observe(MutationObserver {
+                sheet_id: ws.sheet_id,
+                journal: Some(Arc::clone(&journal)),
+            });
+        }
+        self.evaluation.display.journal = Some(journal);
+    }
+
+    pub(crate) fn register_display_sheet(&mut self, sheet: u32, added: bool) {
+        let Some(journal) = &self.evaluation.display.journal else {
+            return;
+        };
+        let Some(ws) = self.workbook.worksheets.get_mut(sheet as usize) else {
+            return;
+        };
+        if added {
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            for (row, col, _) in ws.sheet_data.cells() {
+                records.cells.entry((ws.sheet_id, row, col)).or_insert(None);
+            }
+        }
+        ws.sheet_data.observe(MutationObserver {
+            sheet_id: ws.sheet_id,
+            journal: Some(Arc::clone(journal)),
+        });
+    }
+
+    pub(crate) fn record_display_sheet_removal(&mut self, sheet: u32) {
+        if self.evaluation.display.journal.is_some() {
+            if let Some(ws) = self.workbook.worksheets.get_mut(sheet as usize) {
+                ws.sheet_data.observe_removal();
+            }
+        }
+    }
+
+    pub(crate) fn take_display_journal(&mut self) -> DisplayDelta {
+        let Some(journal) = self.evaluation.display.journal.take() else {
+            return DisplayDelta::default();
+        };
+        for ws in &mut self.workbook.worksheets {
+            ws.sheet_data.observe(MutationObserver::default());
+        }
+        let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        {
+            self.evaluation.display.journal_positions = records.cells.len();
+        }
+        let sheets: HashMap<_, _> = self
+            .workbook
+            .worksheets
+            .iter()
+            .enumerate()
+            .map(|(index, ws)| (ws.sheet_id, index))
+            .collect();
+        let cells = records
+            .cells
+            .drain()
+            .filter_map(|(p, before)| {
+                let after = sheets
+                    .get(&p.0)
+                    .and_then(|&i| self.workbook.worksheets[i].cell(p.1, p.2))
+                    .as_deref()
+                    .and_then(CachedCell::of);
+                (before != after).then_some((p, before, after))
+            })
+            .collect();
+        let links = records
+            .links
+            .drain()
+            .filter_map(|(p, before)| {
+                let after = sheets
+                    .get(&p.0)
+                    .and_then(|&i| self.links.get(&(i as u32, p.1, p.2)))
+                    .cloned();
+                (before != after).then_some((p, before, after))
+            })
+            .collect();
+        DisplayDelta { cells, links }
+    }
+
+    fn record_dynamic_link(&self, position: (u32, i32, i32)) {
+        if let Some(journal) = &self.evaluation.display.journal {
+            if let Some(ws) = self.workbook.worksheets.get(position.0 as usize) {
+                journal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .links
+                    .entry((ws.sheet_id, position.1, position.2))
+                    .or_insert_with(|| self.links.get(&position).cloned());
+            }
+        }
+    }
+    pub(crate) fn insert_dynamic_link(&mut self, position: (u32, i32, i32), link: Link) {
+        self.record_dynamic_link(position);
+        self.links.insert(position, link);
+    }
+    pub(crate) fn remove_dynamic_link(&mut self, position: &(u32, i32, i32)) {
+        if self.links.contains_key(position) {
+            self.record_dynamic_link(*position);
+            self.links.remove(position);
+        }
+    }
+    pub(crate) fn clear_dynamic_links(&mut self) {
+        if self.evaluation.display.journal.is_some() {
+            for &position in self.links.keys() {
+                self.record_dynamic_link(position);
+            }
+        }
+        self.links.clear();
     }
 
     pub(crate) fn begin_display_edit(&mut self) {
@@ -101,13 +242,33 @@ impl Model<'_> {
         if self.evaluation.display.edit_depth != 0 {
             return;
         }
-        self.links.retain(|&(sheet, row, column), _| {
-            self.workbook
+        let positions: Vec<_> = if let Some(journal) = &self.evaluation.display.journal {
+            let records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            records
+                .cells
+                .keys()
+                .filter_map(|p| {
+                    self.workbook
+                        .worksheets
+                        .iter()
+                        .position(|ws| ws.sheet_id == p.0)
+                        .map(|i| (i as u32, p.1, p.2))
+                })
+                .collect()
+        } else {
+            self.links.keys().copied().collect()
+        };
+        for position in positions {
+            if !self
+                .workbook
                 .worksheets
-                .get(sheet as usize)
-                .and_then(|ws| ws.cell(row, column))
-                .is_some_and(|cell| cell.has_formula())
-        });
+                .get(position.0 as usize)
+                .and_then(|ws| ws.cell(position.1, position.2))
+                .is_some_and(|c| c.has_formula())
+            {
+                self.remove_dynamic_link(&position);
+            }
+        }
         let requested = std::mem::take(&mut self.evaluation.display.calculation_requested);
         if calculate && requested {
             self.evaluate();
@@ -220,22 +381,31 @@ impl Model<'_> {
                     .cell(key.1, key.2)
                     .is_some_and(|c| c.has_formula())
                 {
-                    self.links.insert(position, link.clone());
+                    self.insert_dynamic_link(position, link.clone());
                 }
             } else {
-                self.links.remove(&position);
+                self.remove_dynamic_link(&position);
             }
         }
     }
 
-    /// Preserve derived fields while the existing structural implementation
-    /// rewrites formulas and cells. `map` describes the logical cell movement.
+    fn record_snapshot_links(&self, before: &DisplaySnapshot) {
+        if let Some(journal) = &self.evaluation.display.journal {
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            for (&p, link) in &before.links {
+                records.links.entry(p).or_insert_with(|| Some(link.clone()));
+            }
+        }
+    }
+
+    /// Preserve derived fields while structural code rewrites formulas and cells.
     pub(crate) fn with_structural_display_edit<T>(
         &mut self,
         map: impl Fn(Position) -> Option<Position>,
         edit: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
         let before = self.display_snapshot();
+        self.record_snapshot_links(&before);
         self.begin_display_edit();
         let result = edit(self);
         if result.is_ok() {
@@ -341,6 +511,16 @@ impl Model<'_> {
                     }
                 }
                 _ => {}
+            }
+        }
+        // These identities come from before the structural edit, not shifted indices.
+        self.record_snapshot_links(&before);
+        if let Some(journal) = &self.evaluation.display.journal {
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            for &position in before.links.keys() {
+                if let Some(target) = map(position) {
+                    records.links.entry(target).or_insert(None);
+                }
             }
         }
         // Replace the runtime map, removing deleted cells and overwritten targets.
@@ -458,31 +638,46 @@ impl Model<'_> {
         area: &crate::expressions::types::Area,
     ) -> Result<(), String> {
         let ws = self.workbook.worksheet(area.sheet)?;
-        let anchors: Vec<_> = ws
-            .sheet_data
-            .cells()
-            .filter_map(|(row, column, cell)| {
-                if let Cell::ArrayFormula {
-                    kind: ArrayKind::Dynamic,
-                    r: (width, height),
-                    ..
-                } = &*cell
+        let mut owners = HashSet::new();
+        let inside = |r, c| {
+            r >= area.row
+                && r < area.row + area.height
+                && c >= area.column
+                && c < area.column + area.width
+        };
+        #[cfg(test)]
+        let mut visits = 0;
+        for row in area.row..area.row + area.height {
+            for (_, cell) in
+                ws.sheet_data
+                    .cells_in_row_between(row, area.column, area.column + area.width - 1)
+            {
+                #[cfg(test)]
                 {
-                    let inside = row >= area.row
-                        && row < area.row + area.height
-                        && column >= area.column
-                        && column < area.column + area.width;
-                    let overlaps = row < area.row + area.height
-                        && row + height > area.row
-                        && column < area.column + area.width
-                        && column + width > area.column;
-                    if overlaps && !inside {
-                        return Some((row, column, *width, *height));
+                    visits += 1;
+                }
+                if let Cell::SpillCell { a, .. } = &*cell {
+                    if !inside(a.0, a.1) {
+                        owners.insert(*a);
                     }
                 }
-                None
+            }
+        }
+        let anchors: Vec<_> = owners
+            .into_iter()
+            .filter_map(|(r, c)| match ws.cell(r, c).as_deref() {
+                Some(Cell::ArrayFormula {
+                    kind: ArrayKind::Dynamic,
+                    r: (w, h),
+                    ..
+                }) => Some((r, c, *w, *h)),
+                _ => None,
             })
             .collect();
+        #[cfg(test)]
+        {
+            self.evaluation.display.spill_owner_visits += visits;
+        }
         let ws = self.workbook.worksheet_mut(area.sheet)?;
         for (row, column, width, height) in anchors {
             for r in row..row + height {
@@ -545,6 +740,11 @@ impl DisplayConflicts {
     }
 }
 impl DisplayDelta {
+    #[cfg(test)]
+    pub(crate) fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+
     pub(crate) fn discard_conflicts(&mut self, conflicts: &DisplayConflicts) {
         let mut owners = HashSet::new();
         for (p, before, after) in &self.cells {

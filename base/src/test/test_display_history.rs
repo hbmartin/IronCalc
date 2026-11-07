@@ -142,3 +142,90 @@ fn paused_overlapping_partial_spill_cuts_preserve_anchor_and_history() {
         assert_eq!(value(&model, target + 4, 1), "5");
     }
 }
+
+#[test]
+fn paused_history_and_spill_owner_work_ignore_unrelated_cells() {
+    use crate::expressions::types::Area;
+    for size in [100, 10_000] {
+        let mut raw = new_empty_model();
+        for row in 1..=size {
+            raw.update_cell_with_number(0, row, 10, 7.0).unwrap();
+        }
+        raw._set("A1", "=SEQUENCE(5)");
+        raw.evaluate();
+        let mut model = UserModel::from_model(raw);
+        model.pause_evaluation();
+        for row in 1..=10 {
+            model.set_user_input(0, row, 2, "1").unwrap();
+            assert_eq!(model.model.evaluation.display.journal_positions, 1);
+        }
+        let visits = model.model.evaluation.display.spill_owner_visits;
+        model
+            .model
+            .range_clear_contents(&Area {
+                sheet: 0,
+                row: 3,
+                column: 1,
+                width: 1,
+                height: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            model.model.evaluation.display.spill_owner_visits - visits,
+            1
+        );
+        assert_eq!(value(&model, 1, 1), "1");
+        assert_eq!(value(&model, 5, 1), "");
+    }
+}
+
+#[test]
+fn cell_storage_journal_covers_all_writes_and_is_detached_from_clones_and_encoding() {
+    use crate::types::FormulaValue;
+    fn assert_send<T: Send>() {}
+    assert_send::<crate::Model<'static>>();
+    let mut raw = new_empty_model();
+    raw._set("A1", "=1");
+    raw._set("B2", "=2");
+    raw.evaluate();
+    let bytes = raw.to_bytes();
+    let cloned = raw.workbook.clone();
+    raw.start_display_journal();
+    assert_eq!(raw.to_bytes(), bytes);
+    assert_eq!(raw.workbook, cloned);
+    let mut copy = raw.workbook.clone();
+    copy.worksheets[0].sheet_data.remove_row(1);
+    assert_eq!(raw.take_display_journal().cell_count(), 0);
+    raw.start_display_journal();
+    let data = &mut raw.workbook.worksheets[0].sheet_data;
+    if let Some(Cell::CellFormula { v, .. }) = data.cell_mut(1, 1) {
+        *v = FormulaValue::Number(10.0);
+    }
+    data.set_cell(
+        1,
+        1,
+        Cell::CellFormula {
+            f: 0,
+            s: 0,
+            v: FormulaValue::Number(20.0),
+        },
+    );
+    data.remove_row(2);
+    data.set_row(
+        3,
+        [(
+            1,
+            Cell::CellFormula {
+                f: 0,
+                s: 0,
+                v: FormulaValue::Number(30.0),
+            },
+        )],
+    );
+    let delta = raw.take_display_journal();
+    assert_eq!(raw.evaluation.display.journal_positions, 3);
+    raw.apply_display_delta(&delta, true);
+    assert_eq!(raw._get_text("A1"), "1");
+    // Ordinary history restores formula ownership; a display delta only restores its cache.
+    assert_eq!(delta.cell_count(), 3);
+}

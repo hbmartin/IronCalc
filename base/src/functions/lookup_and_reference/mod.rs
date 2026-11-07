@@ -738,7 +738,7 @@ impl<'a> Model<'a> {
             },
         };
         if !self.reading_stored_values() {
-            self.links.insert((cell.sheet, cell.row, cell.column), link);
+            self.insert_dynamic_link((cell.sheet, cell.row, cell.column), link);
         }
         display
     }

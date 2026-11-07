@@ -7,7 +7,7 @@ use bitcode::{Decode, Encode};
 
 use super::row::Row;
 use crate::constants::LAST_ROW;
-use crate::types::Cell;
+use crate::{display::MutationObserver, types::Cell};
 
 const CHUNK_BITS: u32 = 10;
 const CHUNK_ROWS: usize = 1 << CHUNK_BITS;
@@ -29,6 +29,8 @@ pub struct SheetData {
     chunks: Vec<Option<Box<Chunk>>>,
     /// How many rows exist.
     row_count: usize,
+    #[bitcode(skip)]
+    observer: MutationObserver,
 }
 
 #[derive(Encode, Decode, Debug, Clone)]
@@ -60,6 +62,23 @@ fn locate(row: i32) -> Option<(usize, usize)> {
 impl SheetData {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn observe(&mut self, observer: MutationObserver) {
+        self.observer = observer;
+    }
+    pub(crate) fn observe_removal(&self) {
+        if self.observer.active() {
+            for (r, c, cell) in self.cells() {
+                self.observer.capture(r, c, Some(&cell));
+            }
+        }
+    }
+    fn capture(&self, row: i32, column: i32) {
+        if self.observer.active() {
+            self.observer
+                .capture(row, column, self.cell(row, column).as_deref());
+        }
     }
 
     #[inline]
@@ -115,16 +134,19 @@ impl SheetData {
 
     /// The cell at a position, to be changed in place.
     pub fn cell_mut(&mut self, row: i32, column: i32) -> Option<&mut Cell> {
+        self.capture(row, column);
         self.row_mut(row)?.get_mut(column)
     }
 
     /// Puts a cell at a position and returns the one that was there.
     pub fn set_cell(&mut self, row: i32, column: i32, cell: Cell) -> Option<Cell> {
+        self.capture(row, column);
         self.row_or_insert(row)?.insert(column, cell)
     }
 
     /// Removes the cell at a position and returns it.
     pub fn remove_cell(&mut self, row: i32, column: i32) -> Option<Cell> {
+        self.capture(row, column);
         let row_data = self.row_mut(row)?;
         let cell = row_data.remove(column)?;
         if row_data.is_empty() {
@@ -211,6 +233,11 @@ impl SheetData {
 
     /// Removes every cell of a row, and the row.
     pub fn remove_row(&mut self, row: i32) {
+        if self.observer.active() {
+            for (c, cell) in self.cells_in_row(row) {
+                self.observer.capture(row, c, Some(&cell));
+            }
+        }
         let Some((chunk_index, index)) = locate(row) else {
             return;
         };
@@ -229,9 +256,6 @@ impl SheetData {
     /// Replaces the cells of a row. The row exists afterwards, even with no
     /// cells. If a column is given twice the last one stays.
     pub fn set_row(&mut self, row: i32, cells: impl IntoIterator<Item = (i32, Cell)>) {
-        let Some(row_data) = self.row_or_insert(row) else {
-            return;
-        };
         // Collected at its exact size: a row grown cell by cell from empty
         // starts with room for four, and a sheet with a million short rows
         // paid for that four times over.
@@ -252,6 +276,17 @@ impl SheetData {
             });
         }
         cells.shrink_to_fit();
+        if self.observer.active() {
+            for (c, cell) in self.cells_in_row(row) {
+                self.observer.capture(row, c, Some(&cell));
+            }
+            for (c, _) in &cells {
+                self.capture(row, *c);
+            }
+        }
+        let Some(row_data) = self.row_or_insert(row) else {
+            return;
+        };
         *row_data = Row::from_cells(cells);
     }
 }
