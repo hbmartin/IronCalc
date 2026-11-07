@@ -343,6 +343,16 @@ impl<'a> UserModel<'a> {
         range: &Area,
         border_area: &BorderArea,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_area_with_border_in_display_edit(range, border_area)
+        })
+    }
+
+    fn set_area_with_border_in_display_edit(
+        &mut self,
+        range: &Area,
+        border_area: &BorderArea,
+    ) -> Result<(), String> {
         let sheet = range.sheet;
         let first_row = range.row;
         let first_column = range.column;

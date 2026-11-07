@@ -297,7 +297,8 @@ impl Model<'_> {
     /// Recalculate after edits to cell values/formulas, supplying every edited
     /// cell. Structural model APIs automatically invalidate the baseline.
     /// Direct workbook mutations still require a full evaluation.
-    /// `None` means a safe full recalculation was performed.
+    /// `None` means the full evaluation path was selected. Inspect
+    /// [`Model::evaluation_report`] to determine whether it completed successfully.
     pub fn evaluate_incremental(&mut self, edited: &[(u32, i32, i32)]) -> Option<Vec<Key>> {
         let changed = self.evaluate_incremental_headless(edited);
         self.evaluate_conditional_formatting();

@@ -192,6 +192,20 @@ impl<'a> UserModel<'a> {
         clipboard: &ClipboardData,
         is_cut: bool,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.paste_from_clipboard_in_display_edit(source_sheet, source_range, clipboard, is_cut)
+        })
+    }
+
+    fn paste_from_clipboard_in_display_edit(
+        &mut self,
+        source_sheet: u32,
+        source_range: ClipboardTuple,
+        clipboard: &ClipboardData,
+        is_cut: bool,
+    ) -> Result<(), String> {
+        let retained_cut = is_cut.then(|| self.model.display_snapshot());
+        let source_id = self.model.workbook.worksheet(source_sheet)?.sheet_id;
         if is_cut {
             // Moving cells also rewrites references outside the pasted area.
             // Invalidate before any mutation, including while evaluation is paused.
@@ -682,6 +696,32 @@ impl<'a> UserModel<'a> {
                 });
             }
         }
+        if let Some(before) = retained_cut {
+            let target_id = self.model.workbook.worksheet(sheet)?.sheet_id;
+            self.model.restore_mapped_display(before, |p| {
+                if p.0 == source_id
+                    && p.1 >= source_first_row
+                    && p.1 <= source_last_row
+                    && p.2 >= source_first_column
+                    && p.2 <= source_last_column
+                {
+                    Some((
+                        target_id,
+                        p.1 + selected_row - source_first_row,
+                        p.2 + selected_column - source_first_column,
+                    ))
+                } else if p.0 == target_id
+                    && p.1 >= selected_row
+                    && p.1 <= selected_row + source_last_row - source_first_row
+                    && p.2 >= selected_column
+                    && p.2 <= selected_column + source_last_column - source_first_column
+                {
+                    None
+                } else {
+                    Some(p)
+                }
+            });
+        }
         self.push_diff_list(diff_list);
         // select the pasted area
         self.set_selected_range(selected_row, selected_column, max_row, max_column)?;
@@ -691,6 +731,12 @@ impl<'a> UserModel<'a> {
 
     /// Paste a csv-string into the model
     pub fn paste_csv_string(&mut self, area: &Area, csv: &str) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.paste_csv_string_in_display_edit(area, csv)
+        })
+    }
+
+    fn paste_csv_string_in_display_edit(&mut self, area: &Area, csv: &str) -> Result<(), String> {
         let sheet = area.sheet;
 
         // First pass: parse all records so we know the full extent before touching any cells.

@@ -19,7 +19,7 @@ const DATA_BAR = {
     show_value: true,
 };
 
-test('CF: theme redraws and reloads retain a consistent display clock', () => {
+test('CF: redraws retain time and reload preserves saved cell values', () => {
     const model = new Model('clock', 'en', 'UTC', 'en');
     model.pauseEvaluation();
     model.setUserInput(0, 1, 1, '=NOW()');
@@ -38,10 +38,12 @@ test('CF: theme redraws and reloads retain a consistent display clock', () => {
         model.setTheme(model.getTheme());
         assert.equal(model.getCellStyle(0, 1, 2).style.font.b, true);
         assert.equal(reads, 1);
-        const restored = Model.fromBytes(model.toBytes(), 'en');
-        assert.equal(restored.getCellStyle(0, 1, 2).style.font.b, true);
+        const saved = model.toBytes();
+        const restored = Model.fromBytes(saved, 'en');
+        assert.deepEqual(restored.toBytes(), saved);
+        assert.equal(Boolean(restored.getCellStyle(0, 1, 2).style.font.b), false);
         restored.setTheme(restored.getTheme());
-        assert.equal(restored.getCellStyle(0, 1, 2).style.font.b, true);
+        assert.equal(Boolean(restored.getCellStyle(0, 1, 2).style.font.b), false);
         assert.equal(reads, 2);
         restored.evaluate();
         assert.equal(restored.getCellStyle(0, 1, 2).style.font.b, true);

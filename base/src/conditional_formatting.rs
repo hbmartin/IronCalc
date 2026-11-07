@@ -137,7 +137,16 @@ impl<'a> Model<'a> {
     /// processed last). The result for each cell is stored in
     /// `cf_cache` and consumed by `get_extended_style_for_cell`. A standalone
     /// redraw retains the displayed results' timestamp; it does not refresh time.
+    /// Formula references read stored values without calculating or modifying cells.
     pub fn evaluate_conditional_formatting(&mut self) {
+        if self.evaluation.display.edit_depth > 0 {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.evaluation.cf_evaluations += 1;
+        }
+        let _reads = self.start_stored_reads();
         let _clock = self.start_formatting_clock();
         self.cf_cache.clear();
         let sheet_count = self.workbook.worksheets.len();
@@ -1605,6 +1614,17 @@ impl<'a> Model<'a> {
         range: &str,
         rule: CfRuleInput,
     ) -> Result<u32, String> {
+        self.with_display_batch(|this| {
+            this.add_conditional_formatting_in_display_edit(sheet, range, rule)
+        })
+    }
+
+    fn add_conditional_formatting_in_display_edit(
+        &mut self,
+        sheet: u32,
+        range: &str,
+        rule: CfRuleInput,
+    ) -> Result<u32, String> {
         if parse_sqref(range).is_empty() {
             return Err(format!("Invalid conditional formatting range: '{range}'"));
         }
@@ -1636,6 +1656,16 @@ impl<'a> Model<'a> {
         sheet: u32,
         index: usize,
     ) -> Result<crate::cf_types::ConditionalFormatting, String> {
+        self.with_display_batch(|this| {
+            this.delete_conditional_formatting_in_display_edit(sheet, index)
+        })
+    }
+
+    fn delete_conditional_formatting_in_display_edit(
+        &mut self,
+        sheet: u32,
+        index: usize,
+    ) -> Result<crate::cf_types::ConditionalFormatting, String> {
         let ws = self.workbook.worksheet_mut(sheet)?;
         if index >= ws.conditional_formatting.len() {
             return Err(format!(
@@ -1648,6 +1678,18 @@ impl<'a> Model<'a> {
     /// Replaces the range and rule of the CF entry at `index` on `sheet`.
     /// The priority is preserved.  Returns the previous entry.
     pub fn update_conditional_formatting(
+        &mut self,
+        sheet: u32,
+        index: usize,
+        new_range: &str,
+        new_rule: CfRuleInput,
+    ) -> Result<ConditionalFormatting, String> {
+        self.with_display_batch(|this| {
+            this.update_conditional_formatting_in_display_edit(sheet, index, new_range, new_rule)
+        })
+    }
+
+    fn update_conditional_formatting_in_display_edit(
         &mut self,
         sheet: u32,
         index: usize,
@@ -1688,6 +1730,16 @@ impl<'a> Model<'a> {
         sheet: u32,
         index: usize,
     ) -> Result<(), String> {
+        self.with_display_batch(|this| {
+            this.raise_conditional_formatting_priority_in_display_edit(sheet, index)
+        })
+    }
+
+    fn raise_conditional_formatting_priority_in_display_edit(
+        &mut self,
+        sheet: u32,
+        index: usize,
+    ) -> Result<(), String> {
         let ws = self.workbook.worksheet_mut(sheet)?;
         if index >= ws.conditional_formatting.len() {
             return Err(format!(
@@ -1719,6 +1771,16 @@ impl<'a> Model<'a> {
     /// number (the closest rule below it). If the rule is already the
     /// lowest-priority one, this is a no-op.
     pub fn lower_conditional_formatting_priority(
+        &mut self,
+        sheet: u32,
+        index: usize,
+    ) -> Result<(), String> {
+        self.with_display_batch(|this| {
+            this.lower_conditional_formatting_priority_in_display_edit(sheet, index)
+        })
+    }
+
+    fn lower_conditional_formatting_priority_in_display_edit(
         &mut self,
         sheet: u32,
         index: usize,

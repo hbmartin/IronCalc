@@ -37,3 +37,6 @@ chrono-tz = "0.10"
 regex = "1.0"
 
 
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+trybuild = "1.0"

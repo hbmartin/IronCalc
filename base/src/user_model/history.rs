@@ -325,19 +325,28 @@ pub(crate) enum Diff {
 
 pub(crate) type DiffList = Vec<Diff>;
 
+#[derive(Clone)]
+pub(crate) struct HistoryEntry {
+    pub(crate) diffs: DiffList,
+    pub(crate) display: crate::display::DisplayDelta,
+}
+
 #[derive(Default)]
 pub(crate) struct History {
-    pub(crate) undo_stack: Vec<DiffList>,
-    pub(crate) redo_stack: Vec<DiffList>,
+    pub(crate) undo_stack: Vec<HistoryEntry>,
+    pub(crate) redo_stack: Vec<HistoryEntry>,
 }
 
 impl History {
     pub fn push(&mut self, diff_list: DiffList) {
-        self.undo_stack.push(diff_list);
+        self.undo_stack.push(HistoryEntry {
+            diffs: diff_list,
+            display: Default::default(),
+        });
         self.redo_stack = vec![];
     }
 
-    pub fn undo(&mut self) -> Option<Vec<Diff>> {
+    pub fn undo(&mut self) -> Option<HistoryEntry> {
         match self.undo_stack.pop() {
             Some(diff_list) => {
                 self.redo_stack.push(diff_list.clone());
@@ -347,7 +356,7 @@ impl History {
         }
     }
 
-    pub fn redo(&mut self) -> Option<Vec<Diff>> {
+    pub fn redo(&mut self) -> Option<HistoryEntry> {
         match self.redo_stack.pop() {
             Some(diff_list) => {
                 self.undo_stack.push(diff_list.clone());

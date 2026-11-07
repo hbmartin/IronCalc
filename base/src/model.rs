@@ -1830,7 +1830,9 @@ impl<'a> Model<'a> {
         Model::from_workbook(workbook, language_id)
     }
 
-    /// Returns a model from a Workbook object
+    /// Returns a model from a Workbook object. Loading preserves saved formula
+    /// results and formats them without calculating. Invalid iterative settings
+    /// are accepted; explicit calculation reports them as `InvalidSettings`.
     ///
     /// # Examples
     ///
@@ -2284,21 +2286,27 @@ impl<'a> Model<'a> {
         column: i32,
         value: &str,
     ) -> Result<(), String> {
-        let style_index = self.get_cell_style_index(sheet, row, column)?;
+        let result = (|| {
+            let style_index = self.get_cell_style_index(sheet, row, column)?;
 
-        let new_style_index = if common::value_needs_quoting(value, self.language) {
-            self.workbook
-                .styles
-                .get_style_with_quote_prefix(style_index)?
-        } else if self.workbook.styles.style_is_quote_prefix(style_index) {
-            self.workbook
-                .styles
-                .get_style_without_quote_prefix(style_index)?
-        } else {
-            style_index
-        };
+            let new_style_index = if common::value_needs_quoting(value, self.language) {
+                self.workbook
+                    .styles
+                    .get_style_with_quote_prefix(style_index)?
+            } else if self.workbook.styles.style_is_quote_prefix(style_index) {
+                self.workbook
+                    .styles
+                    .get_style_without_quote_prefix(style_index)?
+            } else {
+                style_index
+            };
 
-        self.set_cell_with_string(sheet, row, column, value, new_style_index)
+            self.set_cell_with_string(sheet, row, column, value, new_style_index)
+        })();
+        if result.is_ok() {
+            self.links.remove(&(sheet, row, column));
+        }
+        result
     }
 
     /// Updates the value of a cell with a boolean value
@@ -2332,15 +2340,21 @@ impl<'a> Model<'a> {
         column: i32,
         value: bool,
     ) -> Result<(), String> {
-        let style_index = self.get_cell_style_index(sheet, row, column)?;
-        let new_style_index = if self.workbook.styles.style_is_quote_prefix(style_index) {
-            self.workbook
-                .styles
-                .get_style_without_quote_prefix(style_index)?
-        } else {
-            style_index
-        };
-        self.set_cell_with_boolean(sheet, row, column, value, new_style_index)
+        let result = (|| {
+            let style_index = self.get_cell_style_index(sheet, row, column)?;
+            let new_style_index = if self.workbook.styles.style_is_quote_prefix(style_index) {
+                self.workbook
+                    .styles
+                    .get_style_without_quote_prefix(style_index)?
+            } else {
+                style_index
+            };
+            self.set_cell_with_boolean(sheet, row, column, value, new_style_index)
+        })();
+        if result.is_ok() {
+            self.links.remove(&(sheet, row, column));
+        }
+        result
     }
 
     /// Updates the value of a cell with a number
@@ -2374,15 +2388,21 @@ impl<'a> Model<'a> {
         column: i32,
         value: f64,
     ) -> Result<(), String> {
-        let style_index = self.get_cell_style_index(sheet, row, column)?;
-        let new_style_index = if self.workbook.styles.style_is_quote_prefix(style_index) {
-            self.workbook
-                .styles
-                .get_style_without_quote_prefix(style_index)?
-        } else {
-            style_index
-        };
-        self.set_cell_with_number(sheet, row, column, value, new_style_index)
+        let result = (|| {
+            let style_index = self.get_cell_style_index(sheet, row, column)?;
+            let new_style_index = if self.workbook.styles.style_is_quote_prefix(style_index) {
+                self.workbook
+                    .styles
+                    .get_style_without_quote_prefix(style_index)?
+            } else {
+                style_index
+            };
+            self.set_cell_with_number(sheet, row, column, value, new_style_index)
+        })();
+        if result.is_ok() {
+            self.links.remove(&(sheet, row, column));
+        }
+        result
     }
 
     /// Updates the formula of given cell
@@ -2419,20 +2439,26 @@ impl<'a> Model<'a> {
         column: i32,
         formula: String,
     ) -> Result<(), String> {
-        let mut style_index = self.get_cell_style_index(sheet, row, column)?;
-        if self.workbook.styles.style_is_quote_prefix(style_index) {
-            style_index = self
-                .workbook
-                .styles
-                .get_style_without_quote_prefix(style_index)?;
-        }
+        let result = (|| {
+            let mut style_index = self.get_cell_style_index(sheet, row, column)?;
+            if self.workbook.styles.style_is_quote_prefix(style_index) {
+                style_index = self
+                    .workbook
+                    .styles
+                    .get_style_without_quote_prefix(style_index)?;
+            }
 
-        if let Some(new_formula) = self.formula_without_prefix(&formula) {
-            self.set_cell_with_formula(sheet, row, column, new_formula, style_index)?;
-            Ok(())
-        } else {
-            Err(format!("\"{formula}\" is not a valid formula"))
+            if let Some(new_formula) = self.formula_without_prefix(&formula) {
+                self.set_cell_with_formula(sheet, row, column, new_formula, style_index)?;
+                Ok(())
+            } else {
+                Err(format!("\"{formula}\" is not a valid formula"))
+            }
+        })();
+        if result.is_ok() {
+            self.links.remove(&(sheet, row, column));
         }
+        result
     }
 
     // If we are writing in (sheet, row, column). If it is:
@@ -2481,12 +2507,12 @@ impl<'a> Model<'a> {
             CellStructure::SpillDynamic { anchor, range } => {
                 // It is part of a dynamic array formula, but it is not the anchor.
                 // We can write in it but we need to clear the spill and reset the anchor
-                // to an unevaluated dynamic formula so it will re-spill on next evaluate().
+                // while retaining its cached value until the next calculation.
                 let (anchor_row, anchor_column) = anchor;
                 let (width, height) = range;
                 let ws = self.workbook.worksheet_mut(sheet)?;
                 // Extract formula index and style from the anchor before mutating
-                let (formula_index, anchor_style) = {
+                let (formula_index, anchor_style, retained_value) = {
                     let anchor_cell = ws
                         .cell(anchor_row, anchor_column)
                         .ok_or_else(|| "Dynamic formula anchor not found".to_string())?;
@@ -2494,7 +2520,11 @@ impl<'a> Model<'a> {
                         .get_formula()
                         .ok_or_else(|| "Dynamic formula anchor has no formula".to_string())?;
                     let s = anchor_cell.get_style();
-                    (fi, s)
+                    let retained = match &*anchor_cell {
+                        Cell::ArrayFormula { v, .. } => v.clone(),
+                        _ => FormulaValue::Unevaluated,
+                    };
+                    (fi, s, retained)
                 };
                 ws.set_cell_with_dynamic_formula(
                     anchor_row,
@@ -2504,6 +2534,11 @@ impl<'a> Model<'a> {
                     1,
                     1,
                 )?;
+                if let Some(Cell::ArrayFormula { v, .. }) =
+                    ws.sheet_data.cell_mut(anchor_row, anchor_column)
+                {
+                    *v = retained_value;
+                }
                 for r in anchor_row..anchor_row + height {
                     for c in anchor_column..anchor_column + width {
                         if r == anchor_row && c == anchor_column {
@@ -2550,6 +2585,20 @@ impl<'a> Model<'a> {
     /// * [Model::update_cell_with_bool()]
     /// * [Model::update_cell_with_text()]
     pub fn set_user_input(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        value: String,
+    ) -> Result<(), String> {
+        let result = self.set_user_input_retaining_other_links(sheet, row, column, value);
+        if result.is_ok() {
+            self.links.remove(&(sheet, row, column));
+        }
+        result
+    }
+
+    fn set_user_input_retaining_other_links(
         &mut self,
         sheet: u32,
         row: i32,
@@ -3206,38 +3255,41 @@ impl<'a> Model<'a> {
     /// # }
     /// ```
     pub fn range_clear_contents(&mut self, range: &Area) -> Result<(), String> {
-        if !self.can_clear_range(range)? {
-            return Err("Cannot clear the range because it contains array formulas".to_string());
-        }
-        let sheet = range.sheet;
-        let ws = self.workbook.worksheet_mut(sheet)?;
-        for row in range.row..range.row + range.height {
-            for column in range.column..range.column + range.width {
-                let structure = ws.get_cell_structure(row, column)?;
-                match structure {
-                    CellStructure::DynamicFormula { range }
-                    | CellStructure::ArrayFormula { range, .. } => {
-                        let (width, height) = range;
-                        for r in row..row + height {
-                            for c in column..column + width {
-                                let _ = ws.cell_clear_contents(r, c);
+        self.with_display_batch(|this| {
+            if !this.can_clear_range(range)? {
+                return Err("Cannot clear the range because it contains array formulas".to_string());
+            }
+            this.collapse_partially_cleared_spills(range)?;
+            let sheet = range.sheet;
+            let ws = this.workbook.worksheet_mut(sheet)?;
+            for row in range.row..range.row + range.height {
+                for column in range.column..range.column + range.width {
+                    let structure = ws.get_cell_structure(row, column)?;
+                    match structure {
+                        CellStructure::DynamicFormula { range }
+                        | CellStructure::ArrayFormula { range, .. } => {
+                            let (width, height) = range;
+                            for r in row..row + height {
+                                for c in column..column + width {
+                                    let _ = ws.cell_clear_contents(r, c);
+                                }
                             }
                         }
-                    }
-                    _ => {
-                        let _ = ws.cell_clear_contents(row, column);
+                        _ => {
+                            let _ = ws.cell_clear_contents(row, column);
+                        }
                     }
                 }
             }
-        }
-        // Deleting the contents of a cell also removes its link
-        ws.links.retain(|&(row, column), _| {
-            row < range.row
-                || row >= range.row + range.height
-                || column < range.column
-                || column >= range.column + range.width
-        });
-        Ok(())
+            // Deleting the contents of a cell also removes its link
+            ws.links.retain(|&(row, column), _| {
+                row < range.row
+                    || row >= range.row + range.height
+                    || column < range.column
+                    || column >= range.column + range.width
+            });
+            Ok(())
+        })
     }
 
     // Returns true if for every array formula in the range, the whole spill is included in the range,
@@ -3308,49 +3360,52 @@ impl<'a> Model<'a> {
     /// # Ok(())
     /// # }
     pub fn range_clear_all(&mut self, area: &Area) -> Result<(), String> {
-        if !self.can_clear_range(area)? {
-            return Err("Cannot clear the range because it contains array formulas".to_string());
-        }
-        let worksheet = self.workbook.worksheet_mut(area.sheet)?;
+        self.with_display_batch(|this| {
+            if !this.can_clear_range(area)? {
+                return Err("Cannot clear the range because it contains array formulas".to_string());
+            }
+            this.collapse_partially_cleared_spills(area)?;
+            let worksheet = this.workbook.worksheet_mut(area.sheet)?;
 
-        let sheet_data = &mut worksheet.sheet_data;
-        let mut cells_to_clear = Vec::new();
-        for row in area.row..area.row + area.height {
-            // Only the cells that exist: the area can be a whole row.
-            for column in sheet_data.columns_in_row(row) {
-                if column < area.column || column >= area.column + area.width {
-                    continue;
-                }
-                // If it is part of a dynamic array we need to clear the spill
-                if let Some(Cell::ArrayFormula {
-                    r,
-                    kind: ArrayKind::Dynamic,
-                    ..
-                }) = sheet_data.cell(row, column).as_deref()
-                {
-                    // clear the spill of the dynamic formula
-                    let (width, height) = *r;
-                    for r in row..row + height {
-                        for c in column..column + width {
-                            cells_to_clear.push((r, c));
+            let sheet_data = &mut worksheet.sheet_data;
+            let mut cells_to_clear = Vec::new();
+            for row in area.row..area.row + area.height {
+                // Only the cells that exist: the area can be a whole row.
+                for column in sheet_data.columns_in_row(row) {
+                    if column < area.column || column >= area.column + area.width {
+                        continue;
+                    }
+                    // If it is part of a dynamic array we need to clear the spill
+                    if let Some(Cell::ArrayFormula {
+                        r,
+                        kind: ArrayKind::Dynamic,
+                        ..
+                    }) = sheet_data.cell(row, column).as_deref()
+                    {
+                        // clear the spill of the dynamic formula
+                        let (width, height) = *r;
+                        for r in row..row + height {
+                            for c in column..column + width {
+                                cells_to_clear.push((r, c));
+                            }
                         }
                     }
+                    sheet_data.remove_cell(row, column);
                 }
-                sheet_data.remove_cell(row, column);
             }
-        }
-        for (row, column) in cells_to_clear {
-            // we ignore errors here because the cell might have already been cleared as part of an array formula
-            let _ = worksheet.cell_clear_contents(row, column);
-        }
-        // Deleting the cells also removes their links
-        worksheet.links.retain(|&(row, column), _| {
-            row < area.row
-                || row >= area.row + area.height
-                || column < area.column
-                || column >= area.column + area.width
-        });
-        Ok(())
+            for (row, column) in cells_to_clear {
+                // we ignore errors here because the cell might have already been cleared as part of an array formula
+                let _ = worksheet.cell_clear_contents(row, column);
+            }
+            // Deleting the cells also removes their links
+            worksheet.links.retain(|&(row, column), _| {
+                row < area.row
+                    || row >= area.row + area.height
+                    || column < area.column
+                    || column >= area.column + area.width
+            });
+            Ok(())
+        })
     }
 
     // Finds all the dynamic array formulas that spills:
@@ -3900,8 +3955,13 @@ impl<'a> Model<'a> {
         self.workbook.worksheet_mut(sheet)?.delete_row_style(row)
     }
 
-    /// Sets the locale of the model
+    /// Sets the locale and calculates once. Unchanged values are no-ops.
+    /// Rejects enabled-invalid iteration settings before changing any state.
     pub fn set_locale(&mut self, locale_id: &str) -> Result<(), String> {
+        if self.workbook.settings.locale == locale_id {
+            return Ok(());
+        }
+        self.validate_context_calculation()?;
         let locale = match get_locale(locale_id) {
             Ok(l) => l,
             Err(_) => return Err(format!("Invalid locale: {locale_id}")),
@@ -3913,8 +3973,13 @@ impl<'a> Model<'a> {
         Ok(())
     }
 
-    /// Sets the timezone of the model
+    /// Sets the timezone and calculates once. Unchanged values are no-ops.
+    /// Rejects enabled-invalid iteration settings before changing any state.
     pub fn set_timezone(&mut self, timezone: &str) -> Result<(), String> {
+        if self.workbook.settings.tz == timezone {
+            return Ok(());
+        }
+        self.validate_context_calculation()?;
         let tz = match Tz::parse(timezone) {
             Ok(tz) => tz,
             Err(_) => return Err(format!("Invalid timezone: {}", timezone)),
