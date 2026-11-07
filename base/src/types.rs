@@ -168,7 +168,40 @@ impl Default for CalculationReport {
     }
 }
 
+/// A calculation failure. New failure kinds may be added; callers must include
+/// a wildcard arm when matching this enum outside the engine crate.
+///
+/// ```
+/// use ironcalc_base::types::CalculationFailure;
+/// fn describe(failure: &CalculationFailure) -> &'static str {
+///     match failure {
+///         CalculationFailure::NotEvaluated => "not evaluated",
+///         _ => "calculation failed",
+///     }
+/// }
+/// assert_eq!(describe(&CalculationFailure::NotEvaluated), "not evaluated");
+/// ```
+///
+/// Even matching every current variant requires a wildcard arm:
+///
+/// ```compile_fail,E0004
+/// use ironcalc_base::types::CalculationFailure;
+/// fn inspect(failure: CalculationFailure) {
+///     match failure {
+///         CalculationFailure::InvalidSettings
+///         | CalculationFailure::CircularReference
+///         | CalculationFailure::IterationLimit
+///         | CalculationFailure::NonNumericCycle
+///         | CalculationFailure::NonFiniteValue
+///         | CalculationFailure::CyclicArray
+///         | CalculationFailure::RecursionLimit
+///         | CalculationFailure::VolatileCycle
+///         | CalculationFailure::NotEvaluated => (),
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CalculationFailure {
     InvalidSettings,
     CircularReference,

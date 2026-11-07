@@ -55,8 +55,9 @@ not a guarantee that every cell is error-free.
 Newly created, loaded and invalidated models report `converged=false`,
 `iterations=0`, and `failure=Some(CalculationFailure::NotEvaluated)`. A successful
 calculation has `failure=None`. `NotEvaluated` is appended to the public Rust
-enum; downstream exhaustive matches must handle the new variant. Reports are
-runtime state and do not change workbook or collaboration encodings.
+enum and the enum is non-exhaustive: downstream matches must include a wildcard
+arm to allow future failure kinds. Reports are runtime state and do not change
+workbook or collaboration encodings.
 
 Only executed RAND, RANDBETWEEN and RANDARRAY calls feeding a runtime cycle cause
 `VolatileCycle`. Random values are not frozen. Unrelated or downstream-only
@@ -78,8 +79,11 @@ A separate runtime display timestamp survives after the active clock scope
 closes. Standalone conditional-formatting refreshes, including theme changes,
 reuse that timestamp without reading the clock. Completed formula calculations
 replace it even when convergence fails; invalid settings before any pass preserve
-the previous timestamp and formatting. Headless calculation updates the timestamp
-without rebuilding formatting, which can be refreshed separately afterwards.
+the previous timestamp. Full and incremental evaluation still rebuild formatting
+for the current rules and cell locations at that retained instant, including after
+structural edits and undo/redo. Headless calculation owns the active clock scope
+and updates the display timestamp without rebuilding formatting; the subsequent
+formatting refresh reuses that timestamp after the calculation scope closes.
 Forks copy the display timestamp but start without an active clock.
 
 Loading remains on demand: its initial formatting evaluation captures a fresh
@@ -126,6 +130,13 @@ budget. Size both limits for the worker's actual stack and build profile.
 Defaults remain 256 LAMBDA calls and a 256 KiB evaluation stack budget. Stored
 `#NUM!` errors identify either the configured call-depth limit or the configured
 stack-byte budget; the report retains `RecursionLimit` for both.
+
+Changing the effective LAMBDA-depth ceiling or stack-byte budget resets only the
+calculation report to `NotEvaluated`, retaining result caches and display time.
+These raw Rust setters do not recalculate; reevaluate before forking a session.
+Unchanged effective values are no-ops, including LAMBDA depths clamped to one.
+The cell-evaluation-depth setting only controls unwind/replay, so changing it
+retains the report and results.
 
 An explicit native configuration tested with `FACTORIAL(70)` is:
 
