@@ -14,6 +14,7 @@ use crate::user_model::history::{Diff, DiffList};
 impl<'a> UserModel<'a> {
     pub(super) fn apply_undo_diff_list(&mut self, diff_list: &DiffList) -> Result<(), String> {
         let mut needs_evaluation = false;
+        let mut needs_formatting = false;
         for diff in diff_list.iter().rev() {
             match diff {
                 Diff::SetCellValue {
@@ -363,6 +364,7 @@ impl<'a> UserModel<'a> {
                     new_value: _,
                 } => {
                     self.model.workbook.theme = *old_value.clone();
+                    needs_formatting = true;
                 }
                 Diff::CreateDefinedName {
                     name,
@@ -575,7 +577,7 @@ impl<'a> UserModel<'a> {
                     {
                         ws.conditional_formatting.remove(pos);
                     }
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::DeleteConditionalFormatting {
                     sheet,
@@ -593,7 +595,7 @@ impl<'a> UserModel<'a> {
                             priority: *old_priority,
                         },
                     )?;
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::UpdateConditionalFormatting {
                     sheet,
@@ -612,7 +614,7 @@ impl<'a> UserModel<'a> {
                             priority: *old_priority,
                         };
                     }
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::SwapConditionalFormattingPriority {
                     sheet,
@@ -629,7 +631,7 @@ impl<'a> UserModel<'a> {
                     if let Some(cf) = ws.conditional_formatting.get_mut(*index_b as usize) {
                         cf.priority = *priority_b;
                     }
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::SetCellLink {
                     sheet,
@@ -654,6 +656,9 @@ impl<'a> UserModel<'a> {
                 }
             }
         }
+        if needs_formatting {
+            self.model.evaluate_conditional_formatting();
+        }
         if needs_evaluation {
             // A batch may move cells using several value diffs. The caller
             // cannot supply those implicit edits to an incremental calculation.
@@ -666,6 +671,7 @@ impl<'a> UserModel<'a> {
     /// Applies diff list
     pub(super) fn apply_diff_list(&mut self, diff_list: &DiffList) -> Result<(), String> {
         let mut needs_evaluation = false;
+        let mut needs_formatting = false;
         for diff in diff_list {
             match diff {
                 Diff::SetCellValue {
@@ -894,6 +900,7 @@ impl<'a> UserModel<'a> {
                     new_value,
                 } => {
                     self.model.workbook.theme = *new_value.clone();
+                    needs_formatting = true;
                 }
                 Diff::CreateDefinedName { name, scope, value } => {
                     self.model.new_defined_name(name, *scope, value)?
@@ -1057,12 +1064,12 @@ impl<'a> UserModel<'a> {
                             priority: *priority,
                         },
                     )?;
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::DeleteConditionalFormatting { sheet, index, .. } => {
                     self.model
                         .delete_conditional_formatting(*sheet, *index as usize)?;
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::UpdateConditionalFormatting {
                     sheet,
@@ -1077,7 +1084,7 @@ impl<'a> UserModel<'a> {
                         ws.conditional_formatting[i].range = new_range.clone();
                         ws.conditional_formatting[i].cf_rule = *new_rule.clone();
                     }
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::SwapConditionalFormattingPriority {
                     sheet,
@@ -1094,7 +1101,7 @@ impl<'a> UserModel<'a> {
                     if let Some(cf) = ws.conditional_formatting.get_mut(*index_b as usize) {
                         cf.priority = *priority_a;
                     }
-                    needs_evaluation = true;
+                    needs_formatting = true;
                 }
                 Diff::SetCellLink {
                     sheet,
@@ -1120,6 +1127,9 @@ impl<'a> UserModel<'a> {
             }
         }
 
+        if needs_formatting {
+            self.model.evaluate_conditional_formatting();
+        }
         if needs_evaluation {
             self.model.invalidate_calculation();
             self.evaluate_if_not_paused();

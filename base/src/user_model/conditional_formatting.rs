@@ -69,7 +69,7 @@ impl<'a> UserModel<'a> {
             rule: Box::new(stored_rule),
             priority,
         }]);
-        self.evaluate_if_not_paused();
+        self.model.evaluate_conditional_formatting();
         Ok(())
     }
 
@@ -95,7 +95,7 @@ impl<'a> UserModel<'a> {
             old_rule: Box::new(old.cf_rule),
             old_priority: old.priority,
         }]);
-        self.evaluate_if_not_paused();
+        self.model.evaluate_conditional_formatting();
         Ok(())
     }
 
@@ -146,7 +146,7 @@ impl<'a> UserModel<'a> {
             new_range: new_range.to_string(),
             new_rule: Box::new(stored_rule),
         }]);
-        self.evaluate_if_not_paused();
+        self.model.evaluate_conditional_formatting();
         Ok(())
     }
 
@@ -177,6 +177,17 @@ impl<'a> UserModel<'a> {
     /// `SwapConditionalFormattingPriority` diff for the (at most two) rules whose
     /// priority changed so the operation can be undone/redone.
     fn swap_conditional_formatting_priority(
+        &mut self,
+        sheet: u32,
+        index: u32,
+        raise: bool,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.swap_conditional_formatting_priority_in_display_edit(sheet, index, raise)
+        })
+    }
+
+    fn swap_conditional_formatting_priority_in_display_edit(
         &mut self,
         sheet: u32,
         index: u32,
@@ -219,7 +230,7 @@ impl<'a> UserModel<'a> {
                 priority_b: before[b],
             }]);
         }
-        self.evaluate_if_not_paused();
+        self.model.evaluate_conditional_formatting();
         Ok(())
     }
 }

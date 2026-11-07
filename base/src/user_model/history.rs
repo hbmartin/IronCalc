@@ -328,7 +328,7 @@ pub(crate) type DiffList = Vec<Diff>;
 #[derive(Clone)]
 pub(crate) struct HistoryEntry {
     pub(crate) diffs: DiffList,
-    pub(crate) display: crate::display::DisplayDelta,
+    pub(crate) display: std::sync::Arc<crate::display::DisplayDelta>,
 }
 
 #[derive(Default)]
