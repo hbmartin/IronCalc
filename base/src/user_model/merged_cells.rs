@@ -141,13 +141,31 @@ impl UserModel<'_> {
             let new_value =
                 self.model
                     .get_localized_cell_content(sheet, range.row, range.column)?;
-            diff_list.push(Diff::SetCellValue {
-                sheet,
-                row: range.row,
-                column: range.column,
-                new_value,
-                old_value: Box::new(anchor_old_value),
-            });
+            if matches!(
+                anchor_new_value,
+                Some(Cell::ArrayFormula {
+                    kind: crate::types::ArrayKind::Cse,
+                    ..
+                })
+            ) {
+                diff_list.push(Diff::SetArrayValue {
+                    sheet,
+                    row: range.row,
+                    column: range.column,
+                    width: 1,
+                    height: 1,
+                    new_value,
+                    old_values: vec![vec![anchor_old_value]],
+                });
+            } else {
+                diff_list.push(Diff::SetCellValue {
+                    sheet,
+                    row: range.row,
+                    column: range.column,
+                    new_value,
+                    old_value: Box::new(anchor_old_value),
+                });
+            }
         }
         let anchor_new_link = worksheet.links.get(&(range.row, range.column)).cloned();
         if anchor_new_link != anchor_old_link {

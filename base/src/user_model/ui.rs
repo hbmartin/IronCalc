@@ -70,6 +70,7 @@ impl Default for WorksheetView {
 /// This is runtime state of the [UserModel]: it is not part of the workbook
 /// and it is not serialized. A workbook always opens on its first sheet with
 /// A1 selected.
+#[derive(Clone)]
 pub(crate) struct WorkbookView {
     /// The index of the currently selected sheet.
     pub(crate) sheet: u32,

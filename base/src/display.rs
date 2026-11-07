@@ -106,6 +106,8 @@ pub(crate) struct DisplayState {
     pub(crate) journal_positions: usize,
     #[cfg(test)]
     pub(crate) spill_owner_visits: usize,
+    #[cfg(test)]
+    pub(crate) paste_cells: usize,
 }
 
 pub(crate) struct StoredReadsGuard(Arc<AtomicBool>, bool);
@@ -288,6 +290,56 @@ impl Model<'_> {
         DisplayDelta { cells, links }
     }
 
+    pub(crate) fn prepared_display_cells(&self) -> Vec<(u32, i32, i32, Option<Cell>)> {
+        let Some(journal) = &self.evaluation.display.journal else {
+            return Vec::new();
+        };
+        journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cells
+            .keys()
+            .filter_map(|&(id, r, c)| {
+                let sheet = self.get_sheet_index_by_sheet_id(id)?;
+                Some((
+                    sheet,
+                    r,
+                    c,
+                    self.workbook.worksheets[sheet as usize]
+                        .cell(r, c)
+                        .map(std::borrow::Cow::into_owned),
+                ))
+            })
+            .collect()
+    }
+    pub(crate) fn prepared_dynamic_links(&self) -> Vec<((u32, i32, i32), Option<Link>)> {
+        let Some(journal) = &self.evaluation.display.journal else {
+            return Vec::new();
+        };
+        journal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .links
+            .keys()
+            .filter_map(|&(id, r, c)| {
+                let sheet = self.get_sheet_index_by_sheet_id(id)?;
+                let p = (sheet, r, c);
+                Some((p, self.links.get(&p).cloned()))
+            })
+            .collect()
+    }
+    pub(crate) fn retain_prepared_replay(&self, delta: &DisplayDelta) {
+        if let Some(journal) = &self.evaluation.display.journal {
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            records
+                .replay_cells
+                .extend(delta.cells.iter().map(|(p, _, _)| *p));
+            records
+                .replay_links
+                .extend(delta.links.iter().map(|(p, _, _)| *p));
+        }
+    }
+
     fn record_dynamic_link(&self, position: (u32, i32, i32)) {
         if let Some(journal) = &self.evaluation.display.journal {
             if let Some(ws) = self.workbook.worksheets.get(position.0 as usize) {
@@ -404,7 +456,10 @@ impl Model<'_> {
         target: (i32, i32),
         cell: &Cell,
     ) {
-        if let Some(cached) = CachedCell::of(cell) {
+        if let Some(mut cached) = CachedCell::of(cell) {
+            if let CachedCell::Formula(_, Some((ArrayKind::Dynamic, extent))) = &mut cached {
+                *extent = (1, 1);
+            }
             self.restore_cached_cell(sheet, target.0, target.1, &cached);
         }
         let old = (sheet, source.0, source.1);
@@ -529,7 +584,7 @@ impl Model<'_> {
         }
     }
 
-    fn record_snapshot_links(&self, before: &DisplaySnapshot) {
+    pub(crate) fn record_snapshot_links(&self, before: &DisplaySnapshot) {
         if let Some(journal) = &self.evaluation.display.journal {
             let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
             for (&p, link) in &before.links {
