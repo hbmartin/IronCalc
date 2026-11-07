@@ -161,3 +161,5 @@ mod test_trigonometric_reciprocals;
 mod test_types;
 mod text_functions;
 mod user_model;
+
+mod test_display_history;

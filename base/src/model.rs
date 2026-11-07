@@ -2304,7 +2304,7 @@ impl<'a> Model<'a> {
             self.set_cell_with_string(sheet, row, column, value, new_style_index)
         })();
         if result.is_ok() {
-            self.links.remove(&(sheet, row, column));
+            self.remove_dynamic_link(&(sheet, row, column));
         }
         result
     }
@@ -2352,7 +2352,7 @@ impl<'a> Model<'a> {
             self.set_cell_with_boolean(sheet, row, column, value, new_style_index)
         })();
         if result.is_ok() {
-            self.links.remove(&(sheet, row, column));
+            self.remove_dynamic_link(&(sheet, row, column));
         }
         result
     }
@@ -2400,7 +2400,7 @@ impl<'a> Model<'a> {
             self.set_cell_with_number(sheet, row, column, value, new_style_index)
         })();
         if result.is_ok() {
-            self.links.remove(&(sheet, row, column));
+            self.remove_dynamic_link(&(sheet, row, column));
         }
         result
     }
@@ -2456,7 +2456,7 @@ impl<'a> Model<'a> {
             }
         })();
         if result.is_ok() {
-            self.links.remove(&(sheet, row, column));
+            self.remove_dynamic_link(&(sheet, row, column));
         }
         result
     }
@@ -2593,7 +2593,7 @@ impl<'a> Model<'a> {
     ) -> Result<(), String> {
         let result = self.set_user_input_retaining_other_links(sheet, row, column, value);
         if result.is_ok() {
-            self.links.remove(&(sheet, row, column));
+            self.remove_dynamic_link(&(sheet, row, column));
         }
         result
     }

@@ -361,7 +361,7 @@ impl Model<'_> {
         dirty.sort_unstable();
         for cell in &dirty {
             self.evaluation.cells.remove(cell);
-            self.links.remove(cell);
+            self.remove_dynamic_link(cell);
         }
         for cell in edited {
             self.evaluation.cells.remove(cell);

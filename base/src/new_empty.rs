@@ -221,6 +221,7 @@ impl<'a> Model<'a> {
         let sheet_id = self.get_new_sheet_id();
         let worksheet = Model::new_empty_worksheet(&sheet_name, sheet_id);
         self.workbook.worksheets.push(worksheet);
+        self.register_display_sheet(self.workbook.worksheets.len() as u32 - 1, true);
         self.reset_parsed_structures();
         (sheet_name, self.workbook.worksheets.len() as u32 - 1)
     }
@@ -268,6 +269,7 @@ impl<'a> Model<'a> {
         self.workbook
             .worksheets
             .insert(sheet_index as usize, worksheet);
+        self.register_display_sheet(sheet_index, true);
         self.reset_parsed_structures();
         Ok(())
     }
@@ -386,6 +388,7 @@ impl<'a> Model<'a> {
         // Insert the copy right after the source sheet.
         let new_index = source_index as usize + 1;
         self.workbook.worksheets.insert(new_index, new_worksheet);
+        self.register_display_sheet(new_index as u32, true);
 
         // Duplicate the relevant defined names as sheet-local names on the copy.
         // We snapshot first to avoid borrowing the workbook while parsing.
@@ -563,6 +566,7 @@ impl<'a> Model<'a> {
         if sheet_index >= sheet_count {
             return Err("Sheet index too large".to_string());
         };
+        self.record_display_sheet_removal(sheet_index);
         self.workbook.worksheets.remove(sheet_index as usize);
         self.reset_parsed_structures();
         Ok(())

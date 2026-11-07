@@ -1190,7 +1190,7 @@ impl<'a> Model<'a> {
         state.circular = circular_anchors.iter().copied().collect();
         state.in_pass = true;
         // dynamic links (HYPERLINK) are rebuilt on every evaluation
-        self.links.clear();
+        self.clear_dynamic_links();
         self.clear_variable_stack();
         self.clear_lambdas();
 
@@ -1452,7 +1452,7 @@ impl<'a> Model<'a> {
         // run that was abandoned to an unwind may have attached one on the
         // strength of values it never really read; this run decides afresh.
         if !self.links.is_empty() {
-            self.links.remove(&key);
+            self.remove_dynamic_link(&key);
         }
         self.evaluation.depth += 1;
         let result = if self.evaluation.circular.contains(&key) {
