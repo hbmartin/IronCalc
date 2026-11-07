@@ -99,7 +99,7 @@ fn rejected_static_array_cut_is_atomic_even_when_target_is_a_spill_child() {
             let report = model.model.evaluation_report().clone();
             let selected = model.get_selected_view();
             let reads = clock_reads();
-            let queue = model.flush_send_queue();
+            model.flush_send_queue();
             assert!(model
                 .paste_from_clipboard(0, cp.range, &cp.data, true)
                 .is_err());
@@ -108,7 +108,13 @@ fn rejected_static_array_cut_is_atomic_even_when_target_is_a_spill_child() {
             assert_eq!(clock_reads(), reads);
             assert_eq!(model.get_selected_view(), selected);
             assert_eq!(value(&model, 5, 3), "5");
-            assert!(model.flush_send_queue().len() < queue.len());
+            assert!(
+                bitcode::decode::<Vec<crate::user_model::history::QueueDiffs>>(
+                    &model.flush_send_queue()
+                )
+                .unwrap()
+                .is_empty()
+            );
             model.undo().unwrap(); // The prior successful edit, not a failed paste.
             assert_eq!(model.get_cell_content(0, 1, 3).unwrap(), "");
         });
@@ -403,7 +409,7 @@ fn rejected_clipboard_bounds_merges_and_payloads_are_atomic() {
             let bytes = model.to_bytes();
             let report = model.model.evaluation_report().clone();
             let selected = model.get_selected_view();
-            let empty = model.flush_send_queue();
+            model.flush_send_queue();
             assert!(model
                 .paste_from_clipboard(0, cp.range, &cp.data, true)
                 .is_err());
@@ -411,7 +417,11 @@ fn rejected_clipboard_bounds_merges_and_payloads_are_atomic() {
             assert_eq!(*model.model.evaluation_report(), report);
             assert_eq!(model.get_selected_view(), selected);
             let queue = model.flush_send_queue();
-            assert!(queue.len() <= empty.len());
+            assert!(
+                bitcode::decode::<Vec<crate::user_model::history::QueueDiffs>>(&queue)
+                    .unwrap()
+                    .is_empty()
+            );
         }
         // Reject malformed deserialized coordinates before clearing any destination cells.
         let mut payload = serde_json::to_value(&cp.data).unwrap();
