@@ -19,6 +19,38 @@ const DATA_BAR = {
     show_value: true,
 };
 
+test('CF: theme redraws and reloads retain a consistent display clock', () => {
+    const model = new Model('clock', 'en', 'UTC', 'en');
+    model.pauseEvaluation();
+    model.setUserInput(0, 1, 1, '=NOW()');
+    model.setUserInput(0, 1, 2, '1');
+    model.addConditionalFormatting(0, 'B1', {
+        type: 'Formula', formula: 'NOW()=$A$1',
+        format: { font: { b: true } }, stop_if_true: false,
+    });
+    const originalNow = Date.now;
+    let reads = 0;
+    Date.now = () => 1679356799000 + reads++ * 86400000;
+    try {
+        model.evaluate();
+        assert.equal(model.getCellStyle(0, 1, 2).style.font.b, true);
+        model.setTheme(model.getTheme());
+        model.setTheme(model.getTheme());
+        assert.equal(model.getCellStyle(0, 1, 2).style.font.b, true);
+        assert.equal(reads, 1);
+        const restored = Model.fromBytes(model.toBytes(), 'en');
+        assert.equal(restored.getCellStyle(0, 1, 2).style.font.b, true);
+        restored.setTheme(restored.getTheme());
+        assert.equal(restored.getCellStyle(0, 1, 2).style.font.b, true);
+        assert.equal(reads, 2);
+        restored.evaluate();
+        assert.equal(restored.getCellStyle(0, 1, 2).style.font.b, true);
+        assert.equal(reads, 3);
+    } finally {
+        Date.now = originalNow;
+    }
+});
+
 test('CF: empty list initially', () => {
     const model = new Model('Workbook1', 'en', 'UTC', 'en');
     assert.deepEqual(model.getConditionalFormattingList(0), []);

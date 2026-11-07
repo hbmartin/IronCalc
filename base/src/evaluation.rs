@@ -463,6 +463,9 @@ pub(crate) struct Evaluation {
     pub(crate) require_two_iterative_passes: bool,
     /// Shared only with scoped guards, never with another model or session.
     pub(crate) calculation_time: Arc<Mutex<Option<i64>>>,
+    /// Instant matching the displayed results, or the initial formatting snapshot.
+    /// Retained across redraws and invalidation, but never serialized.
+    pub(crate) display_timestamp: Option<i64>,
     pub(crate) lambda_depth: usize,
     pub(crate) max_lambda_depth: usize,
     pub(crate) recursion_limit_hit: bool,
@@ -482,6 +485,7 @@ pub(crate) struct Evaluation {
 
 /// An owned guard lets evaluation borrow the model mutably while ensuring that
 /// the outermost calculation releases its timestamp, including during unwinding.
+#[must_use = "keep the guard alive until calculation finishes"]
 pub(crate) struct CalculationTimeGuard(Arc<Mutex<Option<i64>>>);
 
 impl Drop for CalculationTimeGuard {
@@ -547,6 +551,7 @@ impl Default for Evaluation {
             report: CalculationReport::default(),
             require_two_iterative_passes: true,
             calculation_time: Arc::new(Mutex::new(None)),
+            display_timestamp: None,
             lambda_depth: 0,
             max_lambda_depth: 256,
             recursion_limit_hit: false,
@@ -588,7 +593,20 @@ impl Evaluation {
 impl<'a> Model<'a> {
     /// Start a clock scope only for the outermost calculation. Nested full
     /// fallback and UI evaluation reuse its instant without owning its cleanup.
+    #[must_use = "bind the guard to keep the calculation timestamp active"]
     pub(crate) fn start_calculation_clock(&self) -> Option<CalculationTimeGuard> {
+        self.start_clock(None)
+    }
+
+    /// Redraw existing results at their calculation instant. Before any results
+    /// exist, establish a fresh snapshot for load-time on-demand evaluation.
+    #[must_use = "bind the guard to keep the formatting timestamp active"]
+    pub(crate) fn start_formatting_clock(&self) -> Option<CalculationTimeGuard> {
+        self.start_clock(self.evaluation.display_timestamp)
+    }
+
+    #[must_use = "bind the guard to keep the timestamp active"]
+    fn start_clock(&self, retained: Option<i64>) -> Option<CalculationTimeGuard> {
         let mut timestamp = self
             .evaluation
             .calculation_time
@@ -597,30 +615,43 @@ impl<'a> Model<'a> {
         if timestamp.is_some() {
             return None;
         }
-        *timestamp = Some(crate::model::get_milliseconds_since_epoch());
+        *timestamp = Some(retained.unwrap_or_else(crate::model::get_milliseconds_since_epoch));
         Some(CalculationTimeGuard(Arc::clone(
             &self.evaluation.calculation_time,
         )))
     }
 
     pub(crate) fn calculation_timestamp_ms(&self) -> i64 {
-        self.evaluation
+        let timestamp = *self
+            .evaluation
             .calculation_time
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .unwrap_or_else(crate::model::get_milliseconds_since_epoch)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(
+            timestamp.is_some(),
+            "date evaluation requires an active clock scope"
+        );
+        timestamp.unwrap_or_else(crate::model::get_milliseconds_since_epoch)
     }
 
     /// Require a preceding completed pass before a circular calculation can
     /// converge (default true). False restores first-pass comparison with zero.
     /// The tolerance still measures successive changes, not mathematical stability.
     /// This runtime option is inherited by forks, but is not saved in workbooks.
-    /// A change invalidates the report without evaluating; an unchanged value is a no-op.
+    /// A change invalidates only the report without evaluating, retaining result
+    /// caches and their display timestamp; an unchanged value is a no-op.
     pub fn set_require_two_iterative_passes(&mut self, required: bool) {
-        if self.evaluation.require_two_iterative_passes != required {
-            self.evaluation.require_two_iterative_passes = required;
-            self.invalidate_calculation();
+        self.update_require_two_iterative_passes(required);
+    }
+
+    /// Shared change detection for raw and user APIs, without recalculation.
+    pub(crate) fn update_require_two_iterative_passes(&mut self, required: bool) -> bool {
+        if self.evaluation.require_two_iterative_passes == required {
+            return false;
         }
+        self.evaluation.require_two_iterative_passes = required;
+        self.evaluation.report = CalculationReport::default();
+        true
     }
 
     /// Whether circular calculations require two completed passes (default true).
@@ -647,7 +678,9 @@ impl<'a> Model<'a> {
     pub fn evaluate(&mut self) {
         let _clock = self.start_calculation_clock();
         self.evaluate_headless();
-        self.evaluate_conditional_formatting();
+        if self.evaluation.report.failure != Some(CalculationFailure::InvalidSettings) {
+            self.evaluate_conditional_formatting();
+        }
     }
 
     /// Calculates without rebuilding conditional-formatting/UI caches.
@@ -691,6 +724,7 @@ impl<'a> Model<'a> {
                 .cells()
                 .all(|(_, _, cell)| scalar_calculation_cell(&cell))
         }));
+        self.evaluation.display_timestamp = Some(self.calculation_timestamp_ms());
     }
 
     /// Explicit convergence status; reaching the cap is never convergence.

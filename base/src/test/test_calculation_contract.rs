@@ -11,6 +11,7 @@ fn number(model: &Model, cell: &str) -> f64 {
         value => panic!("{cell}: {value:?}"),
     }
 }
+#[cfg(not(target_family = "wasm"))]
 fn sumto(model: &mut Model) {
     model
         .new_defined_name("SUMTO", None, "LAMBDA(n,IF(n=0,0,n+SUMTO(n-1)))")
@@ -22,7 +23,10 @@ fn new_and_loaded_models_require_evaluation_before_convergence() {
     let mut model = new_empty_model();
     assert!(!model.evaluation_report().converged);
     assert_eq!(model.evaluation_report().iterations, 0);
-    assert_eq!(model.evaluation_report().failure, None);
+    assert_eq!(
+        model.evaluation_report().failure,
+        Some(CalculationFailure::NotEvaluated)
+    );
 
     model._set("A1", "=21*2");
     model.evaluate_headless();
@@ -33,7 +37,10 @@ fn new_and_loaded_models_require_evaluation_before_convergence() {
     let mut restored = Model::from_bytes(&bytes, "en").unwrap();
     assert!(!restored.evaluation_report().converged);
     assert_eq!(restored.evaluation_report().iterations, 0);
-    assert_eq!(restored.evaluation_report().failure, None);
+    assert_eq!(
+        restored.evaluation_report().failure,
+        Some(CalculationFailure::NotEvaluated)
+    );
 
     restored.evaluate_headless();
     assert!(restored.evaluation_report().converged);
@@ -51,7 +58,10 @@ fn invalidated_models_require_reevaluation_before_convergence() {
     model.insert_rows(0, 1, 1).unwrap();
     assert!(!model.evaluation_report().converged);
     assert_eq!(model.evaluation_report().iterations, 0);
-    assert_eq!(model.evaluation_report().failure, None);
+    assert_eq!(
+        model.evaluation_report().failure,
+        Some(CalculationFailure::NotEvaluated)
+    );
 
     model.evaluate_headless();
     assert!(model.evaluation_report().converged);
@@ -162,6 +172,7 @@ fn incremental_preserves_failure_after_unrelated_edit() {
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))]
 fn configured_lambda_depth_allows_more_than_64_calls() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -193,6 +204,7 @@ fn configured_lambda_depth_allows_more_than_64_calls() {
 }
 
 #[test]
+#[cfg(not(target_family = "wasm"))]
 fn infinite_lambda_is_bounded_on_a_small_worker_stack() {
     std::thread::Builder::new()
         .stack_size(512 * 1024)

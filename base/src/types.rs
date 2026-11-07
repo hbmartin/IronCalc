@@ -142,7 +142,8 @@ impl IterativeCalculation {
 
 /// The outcome of a calculation, independent of individual spreadsheet values.
 /// A caller saving simulation results must reject a report with `converged=false`.
-/// Before evaluation or after invalidation, `converged=false` and `iterations=0`.
+/// Before evaluation or after invalidation, `converged=false`, `iterations=0`,
+/// and `failure=Some(CalculationFailure::NotEvaluated)`.
 /// Success means the configured successive-change test passed; small steady
 /// drift can satisfy a positive tolerance. It is not proof of a mathematical limit.
 #[derive(Clone, Debug, PartialEq)]
@@ -162,7 +163,7 @@ impl Default for CalculationReport {
             iterations: 0,
             residual: 0.0,
             had_circular_references: false,
-            failure: None,
+            failure: Some(CalculationFailure::NotEvaluated),
         }
     }
 }
@@ -177,6 +178,8 @@ pub enum CalculationFailure {
     CyclicArray,
     RecursionLimit,
     VolatileCycle,
+    /// No workbook calculation has completed for the current configuration.
+    NotEvaluated,
 }
 
 #[derive(Encode, Decode, Debug, PartialEq, Clone)]

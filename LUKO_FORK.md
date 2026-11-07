@@ -25,8 +25,11 @@ use these names, while JavaScript uses `setRequireTwoIterativePasses` and
 `getRequireTwoIterativePasses`. The switch is local runtime configuration: forks
 inherit it, structural changes and history retain it, and loading a workbook
 resets it to true. It is absent from workbook serialization, undo history, and
-collaboration diffs. Raw Model changes invalidate the report without calculating;
-UserModel changes calculate once unless paused. Setting the same value is a no-op.
+collaboration diffs. Raw Model changes invalidate only the report without
+calculating, even when iteration is disabled. Formula caches, dependency indexes,
+hyperlinks, formatting caches and their display timestamp remain available until
+recalculation. An invalidated report still prevents forking a session. UserModel
+changes calculate once unless paused. Setting the same value is a complete no-op.
 
 Convergence means the configured change threshold was met, not that a
 mathematical limit has been established. For `A1=A1+0.0001` and tolerance `0.001`,
@@ -49,6 +52,12 @@ following an unsuccessful report performs full evaluation before reporting a new
 result. Ordinary spreadsheet errors remain cell values; a successful report is
 not a guarantee that every cell is error-free.
 
+Newly created, loaded and invalidated models report `converged=false`,
+`iterations=0`, and `failure=Some(CalculationFailure::NotEvaluated)`. A successful
+calculation has `failure=None`. `NotEvaluated` is appended to the public Rust
+enum; downstream exhaustive matches must handle the new variant. Reports are
+runtime state and do not change workbook or collaboration encodings.
+
 Only executed RAND, RANDBETWEEN and RANDARRAY calls feeding a runtime cycle cause
 `VolatileCycle`. Random values are not frozen. Unrelated or downstream-only
 volatile formulas, inactive branches, unused named functions and deleted
@@ -64,6 +73,21 @@ cycles can therefore converge. Later full or incremental calculations capture a
 fresh timestamp; forks begin without an active timestamp. This is per calculation,
 not per simulation run. Native and browser implementations preserve the existing
 second precision. TODAY and NOW remain volatile for incremental invalidation.
+
+A separate runtime display timestamp survives after the active clock scope
+closes. Standalone conditional-formatting refreshes, including theme changes,
+reuse that timestamp without reading the clock. Completed formula calculations
+replace it even when convergence fails; invalid settings before any pass preserve
+the previous timestamp and formatting. Headless calculation updates the timestamp
+without rebuilding formatting, which can be refreshed separately afterwards.
+Forks copy the display timestamp but start without an active clock.
+
+Loading remains on demand: its initial formatting evaluation captures a fresh
+snapshot shared by any formulas it reads, without calculating the whole workbook
+or marking its report successful. Later redraws reuse that snapshot until an
+explicit full or incremental calculation. Neither active nor display timestamps
+are serialized, so reloading does not reproduce the saved calculation instant.
+Native and browser conversions floor negative timestamps to the preceding second.
 
 XLSX import preserves valid iteration settings, including zero tolerance. When
 iteration is disabled, malformed/out-of-range fields individually default to
