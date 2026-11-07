@@ -227,19 +227,20 @@ fn writing_into_spill_cell_clears_spill() {
     // A2 is a spill cell. Writing into it should succeed (unlike CSE spills).
     model.set_user_input(0, 2, 1, "999".to_string()).unwrap();
 
-    // After clearing the spill, the anchor (A1) should have been reset to an
-    // unevaluated DynamicFormula and the other spill cells cleared.
+    // Breaking the spill collapses its extent but retains the anchor value
+    // until calculation. All other spill children are cleared.
     let cell_a1 = model._get_cell("A1");
     assert!(
         matches!(
             cell_a1,
             Cell::ArrayFormula {
                 kind: ArrayKind::Dynamic,
-                v: FormulaValue::Unevaluated,
+                v: FormulaValue::Number(10.0),
+                r: (1, 1),
                 ..
             }
         ),
-        "anchor should be an unevaluated DynamicFormula after spill is broken"
+        "anchor should retain its cached value with a collapsed spill until calculation"
     );
 
     // A3 should have been cleared (no longer a spill cell)

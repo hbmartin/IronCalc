@@ -460,6 +460,7 @@ pub(crate) struct Evaluation {
     pub(crate) loop_met: bool,
     pub(crate) iterative_cells: HashSet<CellKey>,
     pub(crate) report: CalculationReport,
+    pub(crate) display: crate::display::DisplayState,
     pub(crate) require_two_iterative_passes: bool,
     /// Shared only with scoped guards, never with another model or session.
     pub(crate) calculation_time: Arc<Mutex<Option<i64>>>,
@@ -477,6 +478,8 @@ pub(crate) struct Evaluation {
     pub(crate) random_cells: HashSet<CellKey>,
     #[cfg(test)]
     pub(crate) full_evaluations: usize,
+    #[cfg(test)]
+    pub(crate) cf_evaluations: usize,
     #[cfg(test)]
     pub(crate) dependency_index_builds: usize,
     #[cfg(test)]
@@ -549,6 +552,7 @@ impl Default for Evaluation {
             loop_met: false,
             iterative_cells: HashSet::new(),
             report: CalculationReport::default(),
+            display: crate::display::DisplayState::default(),
             require_two_iterative_passes: true,
             calculation_time: Arc::new(Mutex::new(None)),
             display_timestamp: None,
@@ -562,6 +566,8 @@ impl Default for Evaluation {
             random_cells: HashSet::new(),
             #[cfg(test)]
             full_evaluations: 0,
+            #[cfg(test)]
+            cf_evaluations: 0,
             #[cfg(test)]
             dependency_index_builds: 0,
             #[cfg(test)]
@@ -673,8 +679,6 @@ impl<'a> Model<'a> {
         self.evaluation.circular.clear();
         self.evaluation.scalar_only = None;
         self.evaluation.report = CalculationReport::default();
-        self.links.clear();
-        self.cf_cache.clear();
     }
 
     /// Evaluates every formula in the workbook.
@@ -682,6 +686,10 @@ impl<'a> Model<'a> {
     /// A circular reference evaluates to `#CIRC!`, unless iterative calculation is
     /// enabled in the workbook settings, see [`Model::set_iterative_calculation`].
     pub fn evaluate(&mut self) {
+        if self.evaluation.display.edit_depth > 0 {
+            self.evaluation.display.calculation_requested = true;
+            return;
+        }
         self.evaluate_headless();
         self.evaluate_conditional_formatting();
     }
@@ -964,6 +972,7 @@ impl<'a> Model<'a> {
     }
 
     pub(crate) fn lambda_entry(&mut self, cell: CellReferenceIndex) -> Result<(), CalcResult> {
+        let formatting = self.reading_stored_values();
         let state = &mut self.evaluation;
         if state.unwinding || state.restart.is_some() {
             return Err(CalcResult::EmptyCell);
@@ -982,8 +991,10 @@ impl<'a> Model<'a> {
                 state.unwinding = true;
                 return Err(CalcResult::EmptyCell);
             }
-            state.recursion_failures.insert(key(cell));
-            state.recursion_limit_hit = true;
+            if !formatting {
+                state.recursion_failures.insert(key(cell));
+                state.recursion_limit_hit = true;
+            }
             let message = if state.lambda_depth >= state.max_lambda_depth {
                 format!(
                     "Configured LAMBDA call-depth limit ({}) reached",
@@ -1203,6 +1214,9 @@ impl<'a> Model<'a> {
     /// not been evaluated in this pass. Reads are performed on behalf of the
     /// cell on top of the stack.
     pub(crate) fn evaluate_cell(&mut self, cell_reference: CellReferenceIndex) -> CalcResult {
+        if self.reading_stored_values() {
+            return self.stored_display_value(cell_reference);
+        }
         if self.evaluation.restart.is_some() || self.evaluation.unwinding {
             // The pass is being abandoned, or the recursion is unwinding;
             // nothing computed now is kept. This comes before anything is put
@@ -1517,7 +1531,7 @@ impl<'a> Model<'a> {
     }
 
     /// The value currently stored at a position, empty if there is no cell.
-    fn stored_value(&self, cell_reference: CellReferenceIndex) -> CalcResult {
+    pub(crate) fn stored_value(&self, cell_reference: CellReferenceIndex) -> CalcResult {
         match self.fetch_cell(cell_reference) {
             Some(cell) => self.get_cell_value(&cell, cell_reference),
             None => CalcResult::EmptyCell,

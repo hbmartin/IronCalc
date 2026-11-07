@@ -737,7 +737,9 @@ impl<'a> Model<'a> {
                 tooltip: None,
             },
         };
-        self.links.insert((cell.sheet, cell.row, cell.column), link);
+        if !self.reading_stored_values() {
+            self.links.insert((cell.sheet, cell.row, cell.column), link);
+        }
         display
     }
 

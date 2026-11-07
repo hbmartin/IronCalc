@@ -21,3 +21,5 @@ pub use ui::SelectedView;
 
 pub use clipboard::ClipboardData;
 pub use common::BorderArea;
+
+mod display;

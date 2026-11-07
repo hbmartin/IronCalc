@@ -521,7 +521,7 @@ fn redraws_retain_time_and_headless_calculations_refresh_it() {
 }
 
 #[test]
-fn reload_establishes_an_on_demand_display_snapshot_without_a_report() {
+fn reload_formats_saved_values_without_calculating_or_reporting_success() {
     let mut model = clock_model();
     with_advancing_time(1679356799000, 86_400_000, || {
         model.evaluate();
@@ -533,12 +533,12 @@ fn reload_establishes_an_on_demand_display_snapshot_without_a_report() {
             Some(CalculationFailure::NotEvaluated)
         );
         assert_eq!(restored.evaluation_report().iterations, 0);
-        assert_eq!(number(&restored, "A1"), first + 1.0);
-        assert_clock_format_matches(&restored);
+        assert_eq!(number(&restored, "A1"), first);
+        assert!(!bold_at(&restored, 1, 2));
         restored.set_theme(restored.get_theme());
         restored.evaluate_conditional_formatting();
         assert_eq!(clock_reads(), 2);
-        assert_clock_format_matches(&restored);
+        assert!(!bold_at(&restored, 1, 2));
         restored.evaluate();
         assert_eq!(number(&restored, "A1"), first + 2.0);
         assert!(restored.evaluation_report().converged);
@@ -827,4 +827,533 @@ fn recursion_diagnostics_are_bounded_on_all_targets() {
         error_message(&model),
         "Configured evaluation stack budget (1 bytes) exceeded"
     );
+}
+
+fn converged_cycle_display() -> Model<'static> {
+    let mut model = new_empty_model();
+    model._set("A1", "=B1+1");
+    model._set("B1", "=MIN(A1,5)");
+    model._set("D1", "=RAND()");
+    model._set("E1", "=HYPERLINK(\"https://example.com\",\"link\")");
+    model
+        .add_conditional_formatting(0, "C1", bold_rule("$A$1>3"))
+        .unwrap();
+    model.set_iterative_calculation(true, 100, 0.001).unwrap();
+    assert_eq!(number(&model, "A1"), 6.0);
+    assert_eq!(number(&model, "B1"), 5.0);
+    model
+}
+
+#[test]
+fn invalid_and_paused_structural_edits_preserve_values_and_links() {
+    for paused in [false, true] {
+        let mut raw = converged_cycle_display();
+        let random = number(&raw, "D1");
+        if !paused {
+            raw.workbook
+                .settings
+                .iterative_calculation
+                .maximum_iterations = 0;
+        }
+        let mut model = UserModel::from_model(raw);
+        if paused {
+            model.pause_evaluation();
+        }
+        model.insert_rows(0, 1, 1).unwrap();
+        assert_eq!(number(&model.model, "A2"), 6.0);
+        assert_eq!(number(&model.model, "B2"), 5.0);
+        assert_eq!(number(&model.model, "D2"), random);
+        assert!(bold_at(&model.model, 2, 3));
+        assert_eq!(model.model.get_links_list(0).unwrap()[0].row, 2);
+        if !paused {
+            assert_invalid_settings(&model.model);
+        }
+        let saved: crate::types::Workbook = bitcode::decode(&model.to_bytes()).unwrap();
+        assert!(matches!(
+            saved.worksheets[0].cell(2, 1).as_deref(),
+            Some(Cell::CellFormula {
+                v: FormulaValue::Number(6.0),
+                ..
+            })
+        ));
+        model.undo().unwrap();
+        assert_eq!(number(&model.model, "A1"), 6.0);
+        assert_eq!(number(&model.model, "D1"), random);
+        assert_clock_link(&model.model, 0, 1, 5);
+        model.redo().unwrap();
+        assert_eq!(number(&model.model, "A2"), 6.0);
+        model.rename_sheet(0, "Renamed").unwrap();
+        assert_eq!(
+            model.model.get_cell_value_by_index(0, 2, 1).unwrap(),
+            CellValue::Number(6.0)
+        );
+        assert_eq!(model.model.get_links_list(0).unwrap().len(), 1);
+        model
+            .add_conditional_formatting(0, "C3", bold_rule("$A$2>3"))
+            .unwrap();
+        model.undo().unwrap();
+        model.redo().unwrap();
+        assert_eq!(
+            model.model.get_cell_value_by_index(0, 2, 1).unwrap(),
+            CellValue::Number(6.0)
+        );
+        assert!(bold_at(&model.model, 3, 3));
+    }
+}
+
+fn assert_clock_link(model: &Model, sheet: u32, row: i32, column: i32) {
+    let links = model.get_links_list(sheet).unwrap();
+    assert!(links
+        .iter()
+        .any(|link| link.dynamic && link.row == row && link.column == column));
+}
+
+#[test]
+fn formatting_reads_are_side_effect_free_through_all_reference_forms() {
+    let mut model = converged_cycle_display();
+    model
+        .new_defined_name("STORED", None, "Sheet1!$A$1")
+        .unwrap();
+    model
+        .add_conditional_formatting(
+            0,
+            "G1",
+            bold_rule("AND(INDIRECT(\"A1\")=6,SUM(A1:B1)=11,STORED=6,D1>=0)"),
+        )
+        .unwrap();
+    model
+        .add_conditional_formatting(
+            0,
+            "G2",
+            bold_rule("HYPERLINK(\"https://other.example\",TRUE())"),
+        )
+        .unwrap();
+    let cells = model.evaluation.cells.clone();
+    let report = model.evaluation_report().clone();
+    let links = model.get_links_list(0).unwrap();
+    let bytes = model.to_bytes();
+    let random = number(&model, "D1");
+    model.evaluation.cells.clear();
+    let empty_cells = model.evaluation.cells.clone();
+    model.evaluate_conditional_formatting();
+    assert_eq!(model.to_bytes(), bytes);
+    assert_eq!(model.get_links_list(0).unwrap(), links);
+    assert_eq!(model.evaluation_report(), &report);
+    assert_eq!(model.evaluation.cells, empty_cells);
+    assert_eq!(number(&model, "D1"), random);
+    assert!(bold_at(&model, 1, 7));
+    assert!(bold_at(&model, 2, 7));
+    model.evaluation.cells = cells;
+}
+
+#[test]
+fn intact_spills_survive_edits_and_partial_spills_wait_for_calculation() {
+    let mut model = new_empty_model();
+    model._set("A1", "=SEQUENCE(5)");
+    model
+        .add_conditional_formatting(0, "B1", bold_rule("SUM(A1#)=15"))
+        .unwrap();
+    model.evaluate();
+    model.workbook.settings.iterative_calculation.enabled = true;
+    model
+        .workbook
+        .settings
+        .iterative_calculation
+        .maximum_iterations = 0;
+    model.insert_rows(0, 10, 1).unwrap();
+    model.evaluate();
+    assert_eq!(number(&model, "A3"), 3.0);
+    assert!(bold_at(&model, 1, 2));
+    model.insert_rows(0, 1, 1).unwrap();
+    assert_eq!(number(&model, "A4"), 3.0);
+    assert!(bold_at(&model, 2, 2));
+    model.move_columns_action(0, 1, 1, 2).unwrap();
+    assert_eq!(number(&model, "C4"), 3.0);
+    model.insert_rows(0, 4, 1).unwrap();
+    assert_eq!(number(&model, "C2"), 1.0);
+    assert_eq!(
+        model.get_cell_value_by_index(0, 3, 3).unwrap(),
+        CellValue::None
+    );
+    assert_eq!(
+        model.get_cell_value_by_index(0, 5, 3).unwrap(),
+        CellValue::None
+    );
+    model.workbook.settings.iterative_calculation.enabled = false;
+    model.evaluate();
+    assert_eq!(number(&model, "C4"), 3.0);
+    assert!(model.evaluation_report().converged);
+}
+
+#[test]
+fn local_history_restores_deleted_spills_and_dynamic_links_without_calculating() {
+    let mut raw = new_empty_model();
+    raw._set("A1", "=SEQUENCE(5)");
+    raw._set("B1", "=HYPERLINK(\"https://example.com\",\"link\")");
+    raw.evaluate();
+    let mut model = UserModel::from_model(raw);
+    model.pause_evaluation();
+    let evaluations = model.model.evaluation.full_evaluations;
+    model.delete_rows(0, 1, 1).unwrap();
+    assert!(model.model.get_links_list(0).unwrap().is_empty());
+    model.undo().unwrap();
+    assert_eq!(number(&model.model, "A3"), 3.0);
+    assert_clock_link(&model.model, 0, 1, 2);
+    model.redo().unwrap();
+    assert!(model.model.get_links_list(0).unwrap().is_empty());
+    model.undo().unwrap();
+    assert_eq!(number(&model.model, "A5"), 5.0);
+    assert_eq!(model.model.evaluation.full_evaluations, evaluations);
+}
+
+#[test]
+fn context_setters_reject_atomically_and_noops_do_not_calculate() {
+    with_advancing_time(1679356799000, 1000, || {
+        let mut raw = clock_model();
+        raw.evaluate();
+        raw.workbook.settings.iterative_calculation.enabled = true;
+        raw.workbook
+            .settings
+            .iterative_calculation
+            .maximum_iterations = 0;
+        raw.evaluate();
+        let bytes = raw.to_bytes();
+        let report = raw.evaluation_report().clone();
+        let reads = clock_reads();
+        assert!(raw.set_timezone("Asia/Tokyo").is_err());
+        assert!(raw.set_locale("de").is_err());
+        raw.set_timezone("UTC").unwrap();
+        raw.set_locale("en").unwrap();
+        assert_eq!(raw.to_bytes(), bytes);
+        assert_eq!(raw.evaluation_report(), &report);
+        assert_eq!(clock_reads(), reads);
+        assert_clock_format_matches(&raw);
+        let mut model = UserModel::from_model(raw);
+        let queue = model.flush_send_queue();
+        assert!(model.set_timezone("Asia/Tokyo").is_err());
+        assert!(model.set_locale("de").is_err());
+        assert!(!model.can_undo());
+        assert_eq!(model.flush_send_queue(), queue);
+        model.model.workbook.settings.iterative_calculation.enabled = false;
+        model.pause_evaluation();
+        assert!(model.set_timezone("Asia/Tokyo").is_err());
+        assert!(model.set_locale("de").is_err());
+        assert_eq!(clock_reads(), reads);
+        model.resume_evaluation();
+        model.set_timezone("Asia/Tokyo").unwrap();
+        assert_eq!(clock_reads(), reads + 1);
+        model.pause_evaluation();
+        let bytes = model.to_bytes();
+        assert!(model.undo().is_err());
+        assert_eq!(model.to_bytes(), bytes);
+        assert!(model.can_undo());
+        assert!(!model.can_redo());
+        model.resume_evaluation();
+        model.undo().unwrap();
+        assert_eq!(model.get_timezone(), "UTC");
+    });
+}
+
+#[test]
+fn cut_and_sheet_operations_retain_the_display_and_history() {
+    let mut raw = converged_cycle_display();
+    raw.new_sheet();
+    let mut model = UserModel::from_model(raw);
+    model.pause_evaluation();
+    model.set_selected_range(1, 1, 1, 5).unwrap();
+    let clipboard = model.copy_to_clipboard().unwrap();
+    let random = number(&model.model, "D1");
+    model.set_selected_cell(3, 1).unwrap();
+    model
+        .paste_from_clipboard(0, clipboard.range, &clipboard.data, true)
+        .unwrap();
+    assert_eq!(number(&model.model, "A3"), 6.0);
+    assert_eq!(number(&model.model, "D3"), random);
+    assert_clock_link(&model.model, 0, 3, 5);
+    model.undo().unwrap();
+    assert_eq!(number(&model.model, "A1"), 6.0);
+    assert_clock_link(&model.model, 0, 1, 5);
+    model.move_sheet(0, 1).unwrap();
+    assert_clock_link(&model.model, 1, 1, 5);
+    model.delete_sheet(1).unwrap();
+    assert!(model.model.get_links_list(0).unwrap().is_empty());
+    model.undo().unwrap();
+    assert_clock_link(&model.model, 1, 1, 5);
+    assert_eq!(
+        model.model.get_cell_value_by_index(1, 1, 1).unwrap(),
+        CellValue::Number(6.0)
+    );
+}
+
+#[test]
+fn loaded_cycles_keep_saved_values_and_empty_results_wait_for_calculation() {
+    let mut raw = converged_cycle_display();
+    raw.workbook
+        .settings
+        .iterative_calculation
+        .maximum_iterations = 0;
+    let bytes = raw.to_bytes();
+    for mut loaded in [
+        Model::from_bytes(&bytes, "en").unwrap(),
+        Model::from_workbook(raw.workbook.clone(), "en").unwrap(),
+    ] {
+        assert_eq!(number(&loaded, "A1"), 6.0);
+        assert_eq!(loaded.to_bytes(), bytes);
+        assert!(bold_at(&loaded, 1, 3));
+        assert_eq!(
+            loaded.evaluation_report().failure,
+            Some(CalculationFailure::NotEvaluated)
+        );
+        assert!(loaded.get_links_list(0).unwrap().is_empty());
+        assert!(loaded.evaluate_incremental(&[]).is_none());
+        assert_invalid_settings(&loaded);
+        assert_eq!(loaded.to_bytes(), bytes);
+        assert_eq!(number(&loaded, "A1"), 6.0);
+    }
+    let mut raw = new_empty_model();
+    raw._set("A1", "=1+1");
+    raw.add_conditional_formatting(0, "B1", bold_rule("A1=2"))
+        .unwrap();
+    let bytes = raw.to_bytes();
+    let mut loaded = Model::from_bytes(&bytes, "en").unwrap();
+    assert_eq!(loaded.to_bytes(), bytes);
+    assert!(!bold_at(&loaded, 1, 2));
+    loaded.evaluate();
+    assert!(bold_at(&loaded, 1, 2));
+}
+
+#[test]
+fn external_context_batches_are_preflighted_in_order_without_side_effects() {
+    use crate::user_model::history::{Diff, DiffType, QueueDiffs};
+    let mut raw = clock_model();
+    raw.evaluate();
+    raw.workbook.settings.iterative_calculation.enabled = true;
+    raw.workbook
+        .settings
+        .iterative_calculation
+        .maximum_iterations = 0;
+    raw.evaluate();
+    let mut model = UserModel::from_model(raw);
+    let bytes = model.to_bytes();
+    let report = model.model.evaluation_report().clone();
+    let change = Diff::SetTimezone {
+        old_value: "UTC".into(),
+        new_value: "Asia/Tokyo".into(),
+    };
+    let invalid = model.get_iterative_calculation();
+    let mut valid = invalid.clone();
+    valid.maximum_iterations = 100;
+    let repair = Diff::SetIterativeCalculation {
+        old_value: invalid,
+        new_value: valid,
+    };
+    let send = |list| {
+        bitcode::encode(&vec![QueueDiffs {
+            r#type: DiffType::Redo,
+            list,
+        }])
+    };
+    assert!(model
+        .apply_external_diffs(&send(vec![change.clone(), repair.clone()]))
+        .is_err());
+    assert_eq!(model.to_bytes(), bytes);
+    assert_eq!(model.model.evaluation_report(), &report);
+    assert_clock_format_matches(&model.model);
+    assert!(!model.can_undo());
+    model
+        .apply_external_diffs(&send(vec![repair, change]))
+        .unwrap();
+    assert_eq!(model.get_timezone(), "Asia/Tokyo");
+    assert!(model.model.evaluation_report().converged);
+    let mut peer = UserModel::new_empty("peer", "en", "UTC", "en").unwrap();
+    peer.set_timezone("Asia/Tokyo").unwrap();
+    let queue = peer.flush_send_queue();
+    let mut paused = UserModel::new_empty("paused", "en", "UTC", "en").unwrap();
+    paused.pause_evaluation();
+    let before = paused.to_bytes();
+    assert!(paused.apply_external_diffs(&queue).is_err());
+    assert_eq!(paused.to_bytes(), before);
+}
+
+#[test]
+fn edit_batches_refresh_formatting_once_without_reading_a_new_display_clock() {
+    with_advancing_time(1679356799000, 86_400_000, || {
+        let mut raw = clock_model();
+        raw.evaluate();
+        let mut model = UserModel::from_model(raw);
+        model.pause_evaluation();
+        let reads = clock_reads();
+        let evaluations = model.model.evaluation.full_evaluations;
+        let formats = model.model.evaluation.cf_evaluations;
+        model.insert_rows(0, 1, 1).unwrap();
+        assert_eq!(model.model.evaluation.cf_evaluations, formats + 1);
+        assert_eq!(model.model.evaluation.full_evaluations, evaluations);
+        assert!(bold_at(&model.model, 2, 2));
+        model.undo().unwrap();
+        assert_clock_format_matches(&model.model);
+        assert_eq!(model.model.evaluation.cf_evaluations, formats + 2);
+        assert_eq!(clock_reads(), reads);
+        model.resume_evaluation();
+        model.insert_columns(0, 1, 1).unwrap();
+        assert_eq!(model.model.evaluation.cf_evaluations, formats + 3);
+        assert_eq!(model.model.evaluation.full_evaluations, evaluations + 1);
+        assert_eq!(clock_reads(), reads + 1);
+        assert!(bold_at(&model.model, 1, 3));
+    });
+}
+
+#[test]
+fn nested_formatting_scopes_use_active_time_without_publishing_incomplete_work() {
+    let mut model = clock_model();
+    with_advancing_time(1679356799000, 86_400_000, || {
+        model.evaluate();
+        let display = model.evaluation.display_timestamp;
+        let clock = model.start_calculation_clock();
+        model.evaluate_conditional_formatting();
+        assert!(!bold_at(&model, 1, 2));
+        assert_eq!(model.evaluation.display_timestamp, display);
+        assert_eq!(clock_reads(), 2);
+        drop(clock);
+        model.evaluate_conditional_formatting();
+        assert_clock_format_matches(&model);
+        assert_eq!(clock_reads(), 2);
+        assert!(model.evaluation.calculation_time.lock().unwrap().is_none());
+    });
+}
+
+#[test]
+fn columns_and_partial_deletions_preserve_cached_results_and_manual_links() {
+    let mut raw = converged_cycle_display();
+    raw.set_cell_link(
+        0,
+        1,
+        6,
+        crate::types::Link::External {
+            target: "https://manual.example".into(),
+            tooltip: None,
+        },
+    )
+    .unwrap();
+    raw.workbook
+        .settings
+        .iterative_calculation
+        .maximum_iterations = 0;
+    let mut model = UserModel::from_model(raw);
+    model.insert_columns(0, 1, 1).unwrap();
+    assert_eq!(number(&model.model, "B1"), 6.0);
+    assert_clock_link(&model.model, 0, 1, 6);
+    assert!(model.model.get_cell_link(0, 1, 7).unwrap().is_some());
+    model.delete_columns(0, 6, 2).unwrap();
+    assert!(model.model.get_links_list(0).unwrap().is_empty());
+    model.undo().unwrap();
+    assert_clock_link(&model.model, 0, 1, 6);
+    assert!(model.model.get_cell_link(0, 1, 7).unwrap().is_some());
+    assert_invalid_settings(&model.model);
+    let mut raw = new_empty_model();
+    raw._set("A1", "=SEQUENCE(5)");
+    raw.evaluate();
+    raw.delete_rows(0, 3, 1).unwrap();
+    assert_eq!(number(&raw, "A1"), 1.0);
+    assert_eq!(
+        raw.get_cell_value_by_index(0, 2, 1).unwrap(),
+        CellValue::None
+    );
+    raw.evaluate();
+    assert_eq!(number(&raw, "A3"), 3.0);
+}
+
+#[test]
+fn explicit_formula_replacement_retires_links_and_local_undo_restores_them() {
+    let mut raw = new_empty_model();
+    raw._set("A1", "=HYPERLINK(\"https://example.com\",\"link\")");
+    raw.evaluate();
+    let mut model = UserModel::from_model(raw);
+    model.pause_evaluation();
+    model.set_user_input(0, 1, 1, "=1+1").unwrap();
+    assert!(model.model.get_links_list(0).unwrap().is_empty());
+    assert!(matches!(
+        model.model._get_cell("A1"),
+        Cell::CellFormula {
+            v: FormulaValue::Unevaluated,
+            ..
+        }
+    ));
+    model.undo().unwrap();
+    assert_clock_link(&model.model, 0, 1, 1);
+    model.redo().unwrap();
+    assert!(model.model.get_links_list(0).unwrap().is_empty());
+    model.undo().unwrap();
+    model.model.update_cell_with_number(0, 1, 1, 2.0).unwrap();
+    assert!(model.model.get_links_list(0).unwrap().is_empty());
+}
+
+#[test]
+fn partial_spill_cut_and_replacement_leave_no_orphaned_children() {
+    for cut in [false, true] {
+        let mut raw = new_empty_model();
+        raw._set("A1", "=SEQUENCE(5)");
+        raw.evaluate();
+        let mut model = UserModel::from_model(raw);
+        model.pause_evaluation();
+        if cut {
+            model.set_selected_cell(3, 1).unwrap();
+            model.set_selected_range(3, 1, 3, 1).unwrap();
+            let clip = model.copy_to_clipboard().unwrap();
+            model.set_selected_cell(3, 3).unwrap();
+            model
+                .paste_from_clipboard(0, clip.range, &clip.data, true)
+                .unwrap();
+        } else {
+            model.set_user_input(0, 3, 1, "9").unwrap();
+        }
+        assert_eq!(number(&model.model, "A1"), 1.0);
+        assert_eq!(
+            model.model.get_cell_value_by_index(0, 2, 1).unwrap(),
+            CellValue::None
+        );
+        assert_eq!(
+            model.model.get_cell_value_by_index(0, 5, 1).unwrap(),
+            CellValue::None
+        );
+        assert_eq!(
+            model.model.evaluation_report().failure,
+            Some(CalculationFailure::NotEvaluated)
+        );
+        model.undo().unwrap();
+        assert_eq!(number(&model.model, "A3"), 3.0);
+    }
+}
+
+#[test]
+fn whole_spill_cut_preserves_anchor_kind_extent_values_and_spill_references() {
+    let mut raw = new_empty_model();
+    raw._set("A1", "=SEQUENCE(5)");
+    raw.add_conditional_formatting(0, "B1", bold_rule("SUM(A1#)=15"))
+        .unwrap();
+    raw.evaluate();
+    let mut model = UserModel::from_model(raw);
+    model.pause_evaluation();
+    model.set_selected_range(1, 1, 5, 1).unwrap();
+    let clip = model.copy_to_clipboard().unwrap();
+    model.set_selected_cell(2, 3).unwrap();
+    model
+        .paste_from_clipboard(0, clip.range, &clip.data, true)
+        .unwrap();
+    assert_eq!(number(&model.model, "C4"), 3.0);
+    assert!(matches!(
+        model.model._get_cell("C2"),
+        Cell::ArrayFormula {
+            r: (1, 5),
+            kind: crate::types::ArrayKind::Dynamic,
+            ..
+        }
+    ));
+    model
+        .add_conditional_formatting(0, "D2", bold_rule("SUM(C2#)=15"))
+        .unwrap();
+    assert!(bold_at(&model.model, 2, 4));
+    model.undo().unwrap();
+    model.undo().unwrap();
+    assert_eq!(number(&model.model, "A3"), 3.0);
+    assert!(bold_at(&model.model, 1, 2));
 }

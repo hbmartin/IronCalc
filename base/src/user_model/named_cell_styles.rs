@@ -25,6 +25,17 @@ impl<'a> UserModel<'a> {
         style: &Style,
         includes: StyleIncludes,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.create_named_style_in_display_edit(name, style, includes)
+        })
+    }
+
+    fn create_named_style_in_display_edit(
+        &mut self,
+        name: &str,
+        style: &Style,
+        includes: StyleIncludes,
+    ) -> Result<(), String> {
         self.model.create_named_style(name, style, includes)?;
         self.push_diff_list(vec![Diff::CreateNamedStyle {
             name: name.to_string(),
@@ -37,6 +48,10 @@ impl<'a> UserModel<'a> {
     /// Deletes a named style. Fails if the style does not exist or is built-in.
     /// Cells that used this style keep their formatting.
     pub fn delete_named_style(&mut self, name: &str) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.delete_named_style_in_display_edit(name))
+    }
+
+    fn delete_named_style_in_display_edit(&mut self, name: &str) -> Result<(), String> {
         let old_xf_id = self.model.workbook.styles.get_xf_id_by_name(name)?;
         self.model.delete_named_style(name)?;
         self.push_diff_list(vec![Diff::DeleteNamedStyle {
@@ -51,6 +66,18 @@ impl<'a> UserModel<'a> {
     /// All cells, rows, and columns using the style pick up the new formatting.
     /// Fails if the style does not exist, is built-in, or if `new_name` is already taken.
     pub fn update_named_style(
+        &mut self,
+        name: &str,
+        new_name: &str,
+        style: &Style,
+        includes: StyleIncludes,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.update_named_style_in_display_edit(name, new_name, style, includes)
+        })
+    }
+
+    fn update_named_style_in_display_edit(
         &mut self,
         name: &str,
         new_name: &str,
@@ -91,6 +118,10 @@ impl<'a> UserModel<'a> {
     /// If the style is not in the model but is a known built-in, it is first added to the
     /// model's style table, then applied to every cell in the selection with undo support.
     pub fn on_apply_named_style(&mut self, name: &str) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.on_apply_named_style_in_display_edit(name))
+    }
+
+    fn on_apply_named_style_in_display_edit(&mut self, name: &str) -> Result<(), String> {
         let mut diff_list = Vec::new();
 
         // Ensure the style exists in the model, adding it from builtins if needed.

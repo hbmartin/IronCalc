@@ -40,6 +40,19 @@ impl UserModel<'_> {
         link: Link,
         label: Option<&str>,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_cell_link_in_display_edit(sheet, row, column, link, label)
+        })
+    }
+
+    fn set_cell_link_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        link: Link,
+        label: Option<&str>,
+    ) -> Result<(), String> {
         let old_link = self.model.get_cell_link(sheet, row, column)?;
         let is_new_link = old_link.is_none();
         let mut diff_list = Vec::new();
@@ -113,6 +126,17 @@ impl UserModel<'_> {
     /// Removes the link attached to cell (`row`, `column`). It is not an error if the
     /// cell has no link. The cell content and the cell style are left untouched.
     pub fn delete_cell_link(&mut self, sheet: u32, row: i32, column: i32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.delete_cell_link_in_display_edit(sheet, row, column)
+        })
+    }
+
+    fn delete_cell_link_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+    ) -> Result<(), String> {
         let old_value = self.model.get_cell_link(sheet, row, column)?;
         if old_value.is_none() {
             return Ok(());

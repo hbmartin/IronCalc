@@ -256,3 +256,18 @@ test('cell link label and style are one undo step', (t) => {
     tooltip: null,
   });
 });
+
+
+test('loading formats saved results without recalculating RAND', (t) => {
+  const model = new UserModel('saved');
+  model.setUserInput(0, 1, 1, '=RAND()');
+  model.addConditionalFormatting(0, 'B1', {
+    type: 'Formula', formula: '$A$1>=0',
+    format: { font: { b: true } }, stop_if_true: false,
+  });
+  const value = model.getFormattedCellValue(0, 1, 1);
+  const bytes = model.toBytes();
+  const restored = UserModel.fromBytes(bytes);
+  t.is(restored.getFormattedCellValue(0, 1, 1), value);
+  t.deepEqual(restored.toBytes(), bytes);
+});

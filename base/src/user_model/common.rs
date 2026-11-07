@@ -214,9 +214,9 @@ fn update_style(old_value: &Style, style_path: &str, value: &str) -> Result<Styl
 /// ```
 pub struct UserModel<'a> {
     pub(crate) model: Model<'a>,
-    history: History,
+    pub(super) history: History,
     send_queue: Vec<QueueDiffs>,
-    pause_evaluation: bool,
+    pub(super) pause_evaluation: bool,
     /// What the user is looking at: selected sheet, selection and scroll
     /// position of each sheet, window size. Runtime state only: it is not
     /// part of the workbook and is not serialized.
@@ -333,11 +333,19 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::redo]
     pub fn undo(&mut self) -> Result<(), String> {
+        self.with_user_display_edit(false, |this| this.undo_in_display_edit())
+    }
+
+    fn undo_in_display_edit(&mut self) -> Result<(), String> {
+        if let Some(entry) = self.history.undo_stack.last() {
+            self.preflight_context_diffs(&entry.diffs, true)?;
+        }
         if let Some(diff_list) = self.history.undo() {
-            self.apply_undo_diff_list(&diff_list)?;
+            self.apply_undo_diff_list(&diff_list.diffs)?;
+            self.model.apply_display_delta(&diff_list.display, true);
             self.send_queue.push(QueueDiffs {
                 r#type: DiffType::Undo,
-                list: diff_list.clone(),
+                list: diff_list.diffs.clone(),
             });
         };
         Ok(())
@@ -348,11 +356,19 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::redo]
     pub fn redo(&mut self) -> Result<(), String> {
+        self.with_user_display_edit(false, |this| this.redo_in_display_edit())
+    }
+
+    fn redo_in_display_edit(&mut self) -> Result<(), String> {
+        if let Some(entry) = self.history.redo_stack.last() {
+            self.preflight_context_diffs(&entry.diffs, false)?;
+        }
         if let Some(diff_list) = self.history.redo() {
-            self.apply_diff_list(&diff_list)?;
+            self.apply_diff_list(&diff_list.diffs)?;
+            self.model.apply_display_delta(&diff_list.display, false);
             self.send_queue.push(QueueDiffs {
                 r#type: DiffType::Redo,
-                list: diff_list.clone(),
+                list: diff_list.diffs.clone(),
             });
         };
         Ok(())
@@ -416,7 +432,14 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::flush_send_queue]
     pub fn apply_external_diffs(&mut self, diff_list_str: &[u8]) -> Result<(), String> {
+        self.with_user_display_edit(false, |this| {
+            this.apply_external_diffs_in_display_edit(diff_list_str)
+        })
+    }
+
+    fn apply_external_diffs_in_display_edit(&mut self, diff_list_str: &[u8]) -> Result<(), String> {
         if let Ok(queue_diffs_list) = bitcode::decode::<Vec<QueueDiffs>>(diff_list_str) {
+            self.preflight_context_queue(&queue_diffs_list)?;
             for queue_diff in queue_diffs_list {
                 if matches!(queue_diff.r#type, DiffType::Redo) {
                     self.apply_diff_list(&queue_diff.list)?;
@@ -435,6 +458,18 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::set_user_input]
     pub fn set_user_input(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        value: &str,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_user_input_in_display_edit(sheet, row, column, value)
+        })
+    }
+
+    fn set_user_input_in_display_edit(
         &mut self,
         sheet: u32,
         row: i32,
@@ -605,6 +640,10 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::new_sheet]
     pub fn new_sheet(&mut self) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.new_sheet_in_display_edit())
+    }
+
+    fn new_sheet_in_display_edit(&mut self) -> Result<(), String> {
         let (name, index) = self.model.new_sheet();
         self.set_selected_sheet(index)?;
         self.push_diff_list(vec![Diff::NewSheet { index, name }]);
@@ -617,6 +656,10 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::duplicate_sheet]
     pub fn duplicate_sheet(&mut self, sheet: u32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.duplicate_sheet_in_display_edit(sheet))
+    }
+
+    fn duplicate_sheet_in_display_edit(&mut self, sheet: u32) -> Result<(), String> {
         let (_name, new_index) = self.model.duplicate_sheet(sheet)?;
         self.set_selected_sheet(new_index)?;
         self.push_diff_list(vec![Diff::DuplicateSheet {
@@ -631,6 +674,10 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::delete_sheet]
     pub fn delete_sheet(&mut self, sheet: u32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.delete_sheet_in_display_edit(sheet))
+    }
+
+    fn delete_sheet_in_display_edit(&mut self, sheet: u32) -> Result<(), String> {
         let worksheet = self.model.workbook.worksheet(sheet)?;
         let sheet_id = worksheet.sheet_id;
 
@@ -655,6 +702,12 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::rename_sheet_by_index]
     pub fn rename_sheet(&mut self, sheet: u32, new_name: &str) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.rename_sheet_in_display_edit(sheet, new_name)
+        })
+    }
+
+    fn rename_sheet_in_display_edit(&mut self, sheet: u32, new_name: &str) -> Result<(), String> {
         let old_value = self.model.workbook.worksheet(sheet)?.name.clone();
         if old_value == new_name {
             return Ok(());
@@ -683,6 +736,16 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::move_sheet]
     pub fn move_sheet(&mut self, sheet_index: u32, new_index: u32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.move_sheet_in_display_edit(sheet_index, new_index)
+        })
+    }
+
+    fn move_sheet_in_display_edit(
+        &mut self,
+        sheet_index: u32,
+        new_index: u32,
+    ) -> Result<(), String> {
         let sheet_count = self.model.workbook.worksheets.len() as u32;
         if sheet_index >= sheet_count {
             return Err(format!("Invalid sheet index {sheet_index}"));
@@ -709,6 +772,10 @@ impl<'a> UserModel<'a> {
     /// * [Model::set_sheet_state]
     /// * [UserModel::unhide_sheet]
     pub fn hide_sheet(&mut self, sheet: u32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.hide_sheet_in_display_edit(sheet))
+    }
+
+    fn hide_sheet_in_display_edit(&mut self, sheet: u32) -> Result<(), String> {
         let sheet_count = self.model.workbook.worksheets.len() as u32;
         for index in 1..sheet_count {
             let sheet_index = (sheet + index) % sheet_count;
@@ -733,6 +800,10 @@ impl<'a> UserModel<'a> {
     /// * [Model::set_sheet_state]
     /// * [UserModel::hide_sheet]
     pub fn unhide_sheet(&mut self, sheet: u32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.unhide_sheet_in_display_edit(sheet))
+    }
+
+    fn unhide_sheet_in_display_edit(&mut self, sheet: u32) -> Result<(), String> {
         let old_value = self.model.workbook.worksheet(sheet)?.state.clone();
         self.push_diff_list(vec![Diff::SetSheetState {
             index: sheet,
@@ -751,6 +822,12 @@ impl<'a> UserModel<'a> {
     /// * [Model::set_sheet_color]
     /// * [UserModel::get_worksheets_properties]
     pub fn set_sheet_color(&mut self, sheet: u32, color: &Color) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_sheet_color_in_display_edit(sheet, color)
+        })
+    }
+
+    fn set_sheet_color_in_display_edit(&mut self, sheet: u32, color: &Color) -> Result<(), String> {
         let old_value = self.model.workbook.worksheet(sheet)?.color.clone();
         self.model.set_sheet_color(sheet, color)?;
         self.push_diff_list(vec![Diff::SetSheetColor {
@@ -766,6 +843,10 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::range_clear_all]
     pub fn range_clear_all(&mut self, range: &Area) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.range_clear_all_in_display_edit(range))
+    }
+
+    fn range_clear_all_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let sheet = range.sheet;
         // TODO: full rows/columns
         let mut old_value = Vec::new();
@@ -812,6 +893,12 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::range_clear_contents]
     pub fn range_clear_contents(&mut self, range: &Area) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.range_clear_contents_in_display_edit(range)
+        })
+    }
+
+    fn range_clear_contents_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let sheet = range.sheet;
         // TODO: full rows/columns
         let mut old_value = Vec::new();
@@ -1006,6 +1093,12 @@ impl<'a> UserModel<'a> {
     /// * [UserModel::range_clear_all]
     /// * [UserModel::range_clear_contents]
     pub fn range_clear_formatting(&mut self, range: &Area) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.range_clear_formatting_in_display_edit(range)
+        })
+    }
+
+    fn range_clear_formatting_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let sheet = range.sheet;
         let mut diff_list = Vec::new();
         if range.row == 1 && range.height == LAST_ROW {
@@ -1071,6 +1164,17 @@ impl<'a> UserModel<'a> {
     ///
     /// See also [`Model::insert_rows`].
     pub fn insert_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.insert_rows_in_display_edit(sheet, row, row_count)
+        })
+    }
+
+    fn insert_rows_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        row_count: i32,
+    ) -> Result<(), String> {
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
         self.model.insert_rows(sheet, row, row_count)?;
 
@@ -1103,6 +1207,17 @@ impl<'a> UserModel<'a> {
         column: i32,
         column_count: i32,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.insert_columns_in_display_edit(sheet, column, column_count)
+        })
+    }
+
+    fn insert_columns_in_display_edit(
+        &mut self,
+        sheet: u32,
+        column: i32,
+        column_count: i32,
+    ) -> Result<(), String> {
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
         self.model.insert_columns(sheet, column, column_count)?;
 
@@ -1125,6 +1240,17 @@ impl<'a> UserModel<'a> {
     ///
     /// See also [`Model::delete_rows`].
     pub fn delete_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.delete_rows_in_display_edit(sheet, row, row_count)
+        })
+    }
+
+    fn delete_rows_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        row_count: i32,
+    ) -> Result<(), String> {
         let worksheet = self.model.workbook.worksheet(sheet)?;
         let mut old_data = Vec::new();
         // Collect data for all rows to be deleted
@@ -1192,6 +1318,17 @@ impl<'a> UserModel<'a> {
     ///
     /// See also [`Model::delete_columns`].
     pub fn delete_columns(
+        &mut self,
+        sheet: u32,
+        column: i32,
+        column_count: i32,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.delete_columns_in_display_edit(sheet, column, column_count)
+        })
+    }
+
+    fn delete_columns_in_display_edit(
         &mut self,
         sheet: u32,
         column: i32,
@@ -1272,6 +1409,18 @@ impl<'a> UserModel<'a> {
         column_count: i32,
         delta: i32,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.move_columns_action_in_display_edit(sheet, column, column_count, delta)
+        })
+    }
+
+    fn move_columns_action_in_display_edit(
+        &mut self,
+        sheet: u32,
+        column: i32,
+        column_count: i32,
+        delta: i32,
+    ) -> Result<(), String> {
         if delta == 0 || column_count <= 0 {
             return Ok(());
         }
@@ -1310,6 +1459,18 @@ impl<'a> UserModel<'a> {
 
     /// Moves a group of rows vertically and adjusts formulas
     pub fn move_rows_action(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        row_count: i32,
+        delta: i32,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.move_rows_action_in_display_edit(sheet, row, row_count, delta)
+        })
+    }
+
+    fn move_rows_action_in_display_edit(
         &mut self,
         sheet: u32,
         row: i32,
@@ -1362,6 +1523,18 @@ impl<'a> UserModel<'a> {
         column_end: i32,
         width: f64,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_columns_width_in_display_edit(sheet, column_start, column_end, width)
+        })
+    }
+
+    fn set_columns_width_in_display_edit(
+        &mut self,
+        sheet: u32,
+        column_start: i32,
+        column_end: i32,
+        width: f64,
+    ) -> Result<(), String> {
         let mut diff_list = Vec::new();
         for column in column_start..=column_end {
             let old_value = self.model.get_column_width(sheet, column)?;
@@ -1382,6 +1555,18 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::set_column_hidden]
     pub fn set_columns_hidden(
+        &mut self,
+        sheet: u32,
+        column_start: i32,
+        column_end: i32,
+        hidden: bool,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_columns_hidden_in_display_edit(sheet, column_start, column_end, hidden)
+        })
+    }
+
+    fn set_columns_hidden_in_display_edit(
         &mut self,
         sheet: u32,
         column_start: i32,
@@ -1452,6 +1637,18 @@ impl<'a> UserModel<'a> {
         row_end: i32,
         hidden: bool,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_rows_hidden_in_display_edit(sheet, row_start, row_end, hidden)
+        })
+    }
+
+    fn set_rows_hidden_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row_start: i32,
+        row_end: i32,
+        hidden: bool,
+    ) -> Result<(), String> {
         let mut diff_list = Vec::new();
         for row in row_start..=row_end {
             let old_value = self.model.workbook.worksheet(sheet)?.is_row_hidden(row)?;
@@ -1497,6 +1694,18 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::set_row_height]
     pub fn set_rows_height(
+        &mut self,
+        sheet: u32,
+        row_start: i32,
+        row_end: i32,
+        height: f64,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_rows_height_in_display_edit(sheet, row_start, row_end, height)
+        })
+    }
+
+    fn set_rows_height_in_display_edit(
         &mut self,
         sheet: u32,
         row_start: i32,
@@ -1559,6 +1768,16 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::set_frozen_rows()]
     pub fn set_frozen_rows_count(&mut self, sheet: u32, frozen_rows: i32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_frozen_rows_count_in_display_edit(sheet, frozen_rows)
+        })
+    }
+
+    fn set_frozen_rows_count_in_display_edit(
+        &mut self,
+        sheet: u32,
+        frozen_rows: i32,
+    ) -> Result<(), String> {
         let old_value = self.model.get_frozen_rows_count(sheet)?;
         self.push_diff_list(vec![Diff::SetFrozenRowsCount {
             sheet,
@@ -1577,6 +1796,16 @@ impl<'a> UserModel<'a> {
         sheet: u32,
         frozen_columns: i32,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_frozen_columns_count_in_display_edit(sheet, frozen_columns)
+        })
+    }
+
+    fn set_frozen_columns_count_in_display_edit(
+        &mut self,
+        sheet: u32,
+        frozen_columns: i32,
+    ) -> Result<(), String> {
         let old_value = self.model.get_frozen_columns_count(sheet)?;
         self.push_diff_list(vec![Diff::SetFrozenColumnsCount {
             sheet,
@@ -1588,6 +1817,10 @@ impl<'a> UserModel<'a> {
 
     /// Paste `styles` in the selected area
     pub fn on_paste_styles(&mut self, styles: &[Vec<Style>]) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.on_paste_styles_in_display_edit(styles))
+    }
+
+    fn on_paste_styles_in_display_edit(&mut self, styles: &[Vec<Style>]) -> Result<(), String> {
         let styles_height = styles.len() as i32;
         let styles_width = styles[0].len() as i32;
         let sheet = self.view.sheet;
@@ -1657,6 +1890,17 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [Model::set_cell_style]
     pub fn update_range_style(
+        &mut self,
+        range: &Area,
+        style_path: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.update_range_style_in_display_edit(range, style_path, value)
+        })
+    }
+
+    fn update_range_style_in_display_edit(
         &mut self,
         range: &Area,
         style_path: &str,
@@ -1960,6 +2204,16 @@ impl<'a> UserModel<'a> {
 
     /// Set the gid lines in the worksheet to visible (`true`) or hidden (`false`)
     pub fn set_show_grid_lines(&mut self, sheet: u32, show_grid_lines: bool) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_show_grid_lines_in_display_edit(sheet, show_grid_lines)
+        })
+    }
+
+    fn set_show_grid_lines_in_display_edit(
+        &mut self,
+        sheet: u32,
+        show_grid_lines: bool,
+    ) -> Result<(), String> {
         let old_value = self.model.workbook.worksheet(sheet)?.show_grid_lines;
         self.model.set_show_grid_lines(sheet, show_grid_lines)?;
 
@@ -2097,6 +2351,20 @@ impl<'a> UserModel<'a> {
         height: i32,
         formula: &str,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_user_array_formula_in_display_edit(sheet, row, column, width, height, formula)
+        })
+    }
+
+    fn set_user_array_formula_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        width: i32,
+        height: i32,
+        formula: &str,
+    ) -> Result<(), String> {
         let ws = self.model.workbook.worksheet(sheet)?;
         let mut old_values = Vec::new();
         for r in row..row + height {
@@ -2135,6 +2403,16 @@ impl<'a> UserModel<'a> {
 
     /// Delete an existing defined name
     pub fn delete_defined_name(&mut self, name: &str, scope: Option<u32>) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.delete_defined_name_in_display_edit(name, scope)
+        })
+    }
+
+    fn delete_defined_name_in_display_edit(
+        &mut self,
+        name: &str,
+        scope: Option<u32>,
+    ) -> Result<(), String> {
         let old_value = self.model.get_defined_name_formula(name, scope)?;
         let diff_list = vec![Diff::DeleteDefinedName {
             name: name.to_string(),
@@ -2149,6 +2427,17 @@ impl<'a> UserModel<'a> {
 
     /// Create a new defined name
     pub fn new_defined_name(
+        &mut self,
+        name: &str,
+        scope: Option<u32>,
+        formula: &str,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.new_defined_name_in_display_edit(name, scope, formula)
+        })
+    }
+
+    fn new_defined_name_in_display_edit(
         &mut self,
         name: &str,
         scope: Option<u32>,
@@ -2172,6 +2461,19 @@ impl<'a> UserModel<'a> {
 
     /// Updates a defined name
     pub fn update_defined_name(
+        &mut self,
+        name: &str,
+        scope: Option<u32>,
+        new_name: &str,
+        new_scope: Option<u32>,
+        new_formula: &str,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.update_defined_name_in_display_edit(name, scope, new_name, new_scope, new_formula)
+        })
+    }
+
+    fn update_defined_name_in_display_edit(
         &mut self,
         name: &str,
         scope: Option<u32>,
@@ -2213,28 +2515,75 @@ impl<'a> UserModel<'a> {
         self.model.is_valid_defined_name(name, scope, formula)
     }
 
-    /// Sets the timezone for the model
+    /// Sets the timezone and calculates once. Changed values are rejected while
+    /// paused or when enabled iteration settings are invalid; history is unchanged.
     pub fn set_timezone(&mut self, timezone: &str) -> Result<(), String> {
+        if self.get_timezone() == timezone {
+            return Ok(());
+        }
+        self.with_user_display_edit(true, |this| this.set_timezone_in_display_edit(timezone))
+    }
+
+    fn set_timezone_in_display_edit(&mut self, timezone: &str) -> Result<(), String> {
+        if self.get_timezone() == timezone {
+            return Ok(());
+        }
+        if self.pause_evaluation {
+            return Err("Cannot change timezone while evaluation is paused".into());
+        }
+        let old_value = self.get_timezone();
+        self.model.set_timezone(timezone)?;
         let diff_list = vec![Diff::SetTimezone {
-            old_value: self.get_timezone(),
+            old_value,
             new_value: timezone.to_string(),
         }];
         self.push_diff_list(diff_list);
-        self.model.set_timezone(timezone)
+        Ok(())
     }
 
-    /// Sets the locale for the model
+    /// Sets the locale and calculates once. Changed values are rejected while
+    /// paused or when enabled iteration settings are invalid; history is unchanged.
     pub fn set_locale(&mut self, locale: &str) -> Result<(), String> {
+        if self.get_locale() == locale {
+            return Ok(());
+        }
+        self.with_user_display_edit(true, |this| this.set_locale_in_display_edit(locale))
+    }
+
+    fn set_locale_in_display_edit(&mut self, locale: &str) -> Result<(), String> {
+        if self.get_locale() == locale {
+            return Ok(());
+        }
+        if self.pause_evaluation {
+            return Err("Cannot change locale while evaluation is paused".into());
+        }
+        let old_value = self.get_locale();
+        self.model.set_locale(locale)?;
         let diff_list = vec![Diff::SetLocale {
-            old_value: self.get_locale(),
+            old_value,
             new_value: locale.to_string(),
         }];
         self.push_diff_list(diff_list);
-        self.model.set_locale(locale)
+        Ok(())
     }
 
     /// Sets the iterative calculation settings of the workbook. See [Model::set_iterative_calculation]
     pub fn set_iterative_calculation(
+        &mut self,
+        enabled: bool,
+        maximum_iterations: u32,
+        maximum_change: f64,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.set_iterative_calculation_in_display_edit(
+                enabled,
+                maximum_iterations,
+                maximum_change,
+            )
+        })
+    }
+
+    fn set_iterative_calculation_in_display_edit(
         &mut self,
         enabled: bool,
         maximum_iterations: u32,
@@ -2347,6 +2696,8 @@ impl<'a> UserModel<'a> {
     pub(super) fn evaluate_if_not_paused(&mut self) {
         if !self.pause_evaluation {
             self.model.evaluate();
+        } else {
+            self.model.invalidate_calculation();
         }
     }
 }

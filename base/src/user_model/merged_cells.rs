@@ -214,6 +214,10 @@ impl UserModel<'_> {
     /// See also:
     /// * [Model::unmerge_cells](crate::Model::unmerge_cells)
     pub fn unmerge_cells(&mut self, range: &Area) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| this.unmerge_cells_in_display_edit(range))
+    }
+
+    fn unmerge_cells_in_display_edit(&mut self, range: &Area) -> Result<(), String> {
         let sheet = range.sheet;
         let old_value = self.model.get_merged_cells(sheet)?.to_vec();
         self.model.unmerge_cells(range)?;

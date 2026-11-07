@@ -35,6 +35,17 @@ impl<'a> UserModel<'a> {
         range: &str,
         rule: CfRuleInput,
     ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.add_conditional_formatting_in_display_edit(sheet, range, rule)
+        })
+    }
+
+    fn add_conditional_formatting_in_display_edit(
+        &mut self,
+        sheet: u32,
+        range: &str,
+        rule: CfRuleInput,
+    ) -> Result<(), String> {
         let priority = self.model.add_conditional_formatting(sheet, range, rule)?;
         // Read back the stored entry so the Diff contains the dxf_id that was assigned.
         let stored_rule = self
@@ -64,6 +75,16 @@ impl<'a> UserModel<'a> {
 
     /// Removes the CF rule at `index` from `sheet`.
     pub fn delete_conditional_formatting(&mut self, sheet: u32, index: u32) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.delete_conditional_formatting_in_display_edit(sheet, index)
+        })
+    }
+
+    fn delete_conditional_formatting_in_display_edit(
+        &mut self,
+        sheet: u32,
+        index: u32,
+    ) -> Result<(), String> {
         let old = self
             .model
             .delete_conditional_formatting(sheet, index as usize)?;
@@ -80,6 +101,18 @@ impl<'a> UserModel<'a> {
 
     /// Replaces the range and rule of the CF entry at `index` on `sheet`.
     pub fn update_conditional_formatting(
+        &mut self,
+        sheet: u32,
+        index: u32,
+        new_range: &str,
+        new_rule: CfRuleInput,
+    ) -> Result<(), String> {
+        self.with_user_display_edit(true, |this| {
+            this.update_conditional_formatting_in_display_edit(sheet, index, new_range, new_rule)
+        })
+    }
+
+    fn update_conditional_formatting_in_display_edit(
         &mut self,
         sheet: u32,
         index: u32,

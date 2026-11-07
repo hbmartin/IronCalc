@@ -615,6 +615,27 @@ impl<'a> Model<'a> {
         column: i32,
         column_count: i32,
     ) -> Result<(), String> {
+        let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        self.with_structural_display_edit(
+            |p| {
+                crate::display::map_axis(
+                    p,
+                    sheet_id,
+                    false,
+                    column,
+                    crate::display::AxisEdit::Insert(column_count),
+                )
+            },
+            |this| this.insert_columns_in_display_edit(sheet, column, column_count),
+        )
+    }
+
+    fn insert_columns_in_display_edit(
+        &mut self,
+        sheet: u32,
+        column: i32,
+        column_count: i32,
+    ) -> Result<(), String> {
         if column_count <= 0 {
             return Err("Cannot add a negative number of cells :)".to_string());
         }
@@ -728,6 +749,27 @@ impl<'a> Model<'a> {
     /// * `column` - The index of the first column to delete.
     /// * `count` - The number of columns to delete.
     pub fn delete_columns(
+        &mut self,
+        sheet: u32,
+        column: i32,
+        column_count: i32,
+    ) -> Result<(), String> {
+        let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        self.with_structural_display_edit(
+            |p| {
+                crate::display::map_axis(
+                    p,
+                    sheet_id,
+                    false,
+                    column,
+                    crate::display::AxisEdit::Delete(column_count),
+                )
+            },
+            |this| this.delete_columns_in_display_edit(sheet, column, column_count),
+        )
+    }
+
+    fn delete_columns_in_display_edit(
         &mut self,
         sheet: u32,
         column: i32,
@@ -1003,6 +1045,27 @@ impl<'a> Model<'a> {
     /// * `row` - The index at which the new rows should be inserted.
     /// * `row_count` - The number of rows to insert.
     pub fn insert_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        self.with_structural_display_edit(
+            |p| {
+                crate::display::map_axis(
+                    p,
+                    sheet_id,
+                    true,
+                    row,
+                    crate::display::AxisEdit::Insert(row_count),
+                )
+            },
+            |this| this.insert_rows_in_display_edit(sheet, row, row_count),
+        )
+    }
+
+    fn insert_rows_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        row_count: i32,
+    ) -> Result<(), String> {
         if row_count <= 0 {
             return Err("Cannot add a negative number of cells :)".to_string());
         }
@@ -1106,6 +1169,27 @@ impl<'a> Model<'a> {
     /// * `row` - The index of the first row to delete.
     /// * `row_count` - The number of rows to delete.
     pub fn delete_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        self.with_structural_display_edit(
+            |p| {
+                crate::display::map_axis(
+                    p,
+                    sheet_id,
+                    true,
+                    row,
+                    crate::display::AxisEdit::Delete(row_count),
+                )
+            },
+            |this| this.delete_rows_in_display_edit(sheet, row, row_count),
+        )
+    }
+
+    fn delete_rows_in_display_edit(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        row_count: i32,
+    ) -> Result<(), String> {
         if row_count <= 0 {
             return Err("Please use insert rows instead".to_string());
         }
@@ -1685,6 +1769,31 @@ impl<'a> Model<'a> {
         column_count: i32,
         delta: i32,
     ) -> Result<(), String> {
+        let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        self.with_structural_display_edit(
+            |p| {
+                crate::display::map_axis(
+                    p,
+                    sheet_id,
+                    false,
+                    column,
+                    crate::display::AxisEdit::Move {
+                        count: column_count,
+                        delta,
+                    },
+                )
+            },
+            |this| this.move_columns_action_in_display_edit(sheet, column, column_count, delta),
+        )
+    }
+
+    fn move_columns_action_in_display_edit(
+        &mut self,
+        sheet: u32,
+        column: i32,
+        column_count: i32,
+        delta: i32,
+    ) -> Result<(), String> {
         if column_count <= 0 || delta == 0 {
             return Ok(());
         }
@@ -1758,6 +1867,31 @@ impl<'a> Model<'a> {
     /// Moves a group of rows [row, row+row_count-1] by delta positions.
     /// CSE array formulas fully within the moved group are preserved as arrays.
     pub fn move_rows_action(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        row_count: i32,
+        delta: i32,
+    ) -> Result<(), String> {
+        let sheet_id = self.workbook.worksheet(sheet)?.sheet_id;
+        self.with_structural_display_edit(
+            |p| {
+                crate::display::map_axis(
+                    p,
+                    sheet_id,
+                    true,
+                    row,
+                    crate::display::AxisEdit::Move {
+                        count: row_count,
+                        delta,
+                    },
+                )
+            },
+            |this| this.move_rows_action_in_display_edit(sheet, row, row_count, delta),
+        )
+    }
+
+    fn move_rows_action_in_display_edit(
         &mut self,
         sheet: u32,
         row: i32,

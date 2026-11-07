@@ -2326,7 +2326,7 @@ impl<'a> Model<'a> {
         if self.evaluation.unwinding || self.evaluation.restart.is_some() {
             return CalcResult::EmptyCell;
         }
-        if self.evaluation.iterating && kind.is_random() {
+        if self.evaluation.iterating && !self.reading_stored_values() && kind.is_random() {
             self.evaluation
                 .random_cells
                 .insert((cell.sheet, cell.row, cell.column));

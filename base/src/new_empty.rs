@@ -234,6 +234,17 @@ impl<'a> Model<'a> {
         sheet_index: u32,
         sheet_id: Option<u32>,
     ) -> Result<(), String> {
+        self.with_structural_display_edit(Self::display_identity, |this| {
+            this.insert_sheet_in_display_edit(sheet_name, sheet_index, sheet_id)
+        })
+    }
+
+    fn insert_sheet_in_display_edit(
+        &mut self,
+        sheet_name: &str,
+        sheet_index: u32,
+        sheet_id: Option<u32>,
+    ) -> Result<(), String> {
         if !is_valid_sheet_name(sheet_name) {
             return Err(format!("Invalid name for a sheet: '{sheet_name}'"));
         }
@@ -290,6 +301,15 @@ impl<'a> Model<'a> {
     ///
     /// Fails if `source_index` is out of range.
     pub fn duplicate_sheet(&mut self, source_index: u32) -> Result<(String, u32), String> {
+        self.with_structural_display_edit(Self::display_identity, |this| {
+            this.duplicate_sheet_in_display_edit(source_index)
+        })
+    }
+
+    fn duplicate_sheet_in_display_edit(
+        &mut self,
+        source_index: u32,
+    ) -> Result<(String, u32), String> {
         // Validate the source and capture what we need before mutating anything.
         let source = self.workbook.worksheet(source_index)?;
         let source_name = source.get_name();
@@ -455,6 +475,16 @@ impl<'a> Model<'a> {
         sheet_index: u32,
         new_name: &str,
     ) -> Result<(), String> {
+        self.with_structural_display_edit(Self::display_identity, |this| {
+            this.rename_sheet_by_index_in_display_edit(sheet_index, new_name)
+        })
+    }
+
+    fn rename_sheet_by_index_in_display_edit(
+        &mut self,
+        sheet_index: u32,
+        new_name: &str,
+    ) -> Result<(), String> {
         if !is_valid_sheet_name(new_name) {
             return Err(format!("Invalid name for a sheet: '{new_name}'."));
         }
@@ -519,6 +549,12 @@ impl<'a> Model<'a> {
     ///   * The sheet does not exists
     ///   * It is the last sheet
     pub fn delete_sheet(&mut self, sheet_index: u32) -> Result<(), String> {
+        self.with_structural_display_edit(Self::display_identity, |this| {
+            this.delete_sheet_in_display_edit(sheet_index)
+        })
+    }
+
+    fn delete_sheet_in_display_edit(&mut self, sheet_index: u32) -> Result<(), String> {
         let worksheets = &self.workbook.worksheets;
         let sheet_count = worksheets.len() as u32;
         if sheet_count == 1 {
@@ -543,6 +579,16 @@ impl<'a> Model<'a> {
     /// Fails if either index is out of range. Moving a sheet to its current
     /// position is a no-op.
     pub fn move_sheet(&mut self, sheet_index: u32, new_index: u32) -> Result<(), String> {
+        self.with_structural_display_edit(Self::display_identity, |this| {
+            this.move_sheet_in_display_edit(sheet_index, new_index)
+        })
+    }
+
+    fn move_sheet_in_display_edit(
+        &mut self,
+        sheet_index: u32,
+        new_index: u32,
+    ) -> Result<(), String> {
         let sheet_count = self.workbook.worksheets.len() as u32;
         if sheet_index >= sheet_count {
             return Err("Sheet index too large".to_string());

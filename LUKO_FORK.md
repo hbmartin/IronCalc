@@ -75,23 +75,50 @@ fresh timestamp; forks begin without an active timestamp. This is per calculatio
 not per simulation run. Native and browser implementations preserve the existing
 second precision. TODAY and NOW remain volatile for incremental invalidation.
 
-A separate runtime display timestamp survives after the active clock scope
-closes. Standalone conditional-formatting refreshes, including theme changes,
-reuse that timestamp without reading the clock. Completed formula calculations
-replace it even when convergence fails; invalid settings before any pass preserve
-the previous timestamp. Full and incremental evaluation still rebuild formatting
-for the current rules and cell locations at that retained instant, including after
-structural edits and undo/redo. Headless calculation owns the active clock scope
-and updates the display timestamp without rebuilding formatting; the subsequent
-formatting refresh reuses that timestamp after the calculation scope closes.
-Forks copy the display timestamp but start without an active clock.
+Conditional formatting reads stored cell results. References, ranges, spill
+references, names and INDIRECT never calculate workbook cells during a redraw;
+formatting expressions cannot attach dynamic hyperlinks or change the calculation
+report. Rule expressions themselves retain their normal function behavior.
 
-Loading remains on demand: its initial formatting evaluation captures a fresh
-snapshot shared by any formulas it reads, without calculating the whole workbook
-or marking its report successful. Later redraws reuse that snapshot until an
-explicit full or incremental calculation. Neither active nor display timestamps
-are serialized, so reloading does not reproduce the saved calculation instant.
-Native and browser conversions floor negative timestamps to the preceding second.
+A separate runtime display timestamp survives after the active clock scope
+closes. Standalone formatting refreshes, including theme changes, reuse it without
+reading the clock. Completed formula calculations replace it even when
+convergence fails. Invalid settings before any pass preserve an existing display
+timestamp; if none exists, initial formatting establishes one. Full and
+incremental evaluation rebuild formatting for current rules and cell locations
+at that retained instant. Headless calculation owns the active scope; formatting
+runs after it closes. Forks copy display time but begin without an active clock.
+
+Loading is permissive and formats saved results without evaluating formulas.
+Saved formula and spill values are retained, missing results remain unevaluated,
+and the report stays `NotEvaluated` until explicit calculation. Initial formatting
+captures a fresh snapshot; later redraws reuse it. Timestamps and dynamic links
+are not serialized, so time-based rules can differ from saved date values until
+calculation, and formula-generated links are recreated by calculation. Manual
+links remain workbook metadata. Native and browser conversions floor negative
+timestamps to the preceding second.
+
+Structural edits invalidate reports, dependency indexes and calculation scratch
+without discarding displayed results. Cached formula values and dynamic links
+follow their owning cells through row, column, cut and sheet operations, even
+when calculation fails or is paused. Formatting refreshes once at the outer edit
+or history boundary, using retained values. Intact spill groups move as groups;
+a partially broken dynamic spill loses its children and resets its extent while
+retaining a surviving anchor's cached value until calculation. CSE restrictions
+remain unchanged. These are retained results, not a successful new calculation.
+
+Local undo/redo keeps sparse runtime display deltas alongside existing history,
+restoring cached values, spills and dynamic links without calculation. The deltas
+are not serialized or sent to collaborators. External diffs preserve available
+state but cannot restore runtime metadata absent from their payload; calculation
+recreates it. Deleted or replaced formulas lose their associated runtime links.
+
+Changed timezone/locale setters reject enabled-invalid iteration settings before
+mutation; UserModel also rejects these changes while paused. Rejection leaves
+context, results, display state, history and queues untouched, including through
+undo/redo and external batches. Unchanged settings are no-ops. A successful
+unpaused context change calculates once, including calculations that complete
+with nonconvergence. Resuming automatic evaluation does not itself calculate.
 
 XLSX import preserves valid iteration settings, including zero tolerance. When
 iteration is disabled, malformed/out-of-range fields individually default to

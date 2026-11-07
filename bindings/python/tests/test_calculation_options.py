@@ -30,3 +30,17 @@ def test_type_stubs_expose_option_on_both_models():
         assert ast.unparse(setter.args.args[1].annotation) == "bool"
         getter = methods["get_require_two_iterative_passes"]
         assert ast.unparse(getter.returns) == "bool"
+
+
+def test_loading_formats_saved_results_without_recalculating_rand():
+    model = ic.UserModel("saved")
+    model.set_user_input(0, 1, 1, "=RAND()")
+    model.add_conditional_formatting(0, "B1", {
+        "type": "Formula", "formula": "$A$1>=0",
+        "format": {"font": {"b": True}}, "stop_if_true": False,
+    })
+    value = model.get_cell_value(0, 1, 1)
+    saved = model.to_bytes()
+    restored = ic.UserModel.from_bytes(saved, "en")
+    assert restored.get_cell_value(0, 1, 1) == value
+    assert restored.to_bytes() == saved
