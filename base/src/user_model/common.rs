@@ -328,7 +328,11 @@ impl<'a> UserModel<'a> {
         self.model.workbook.name = name.to_string();
     }
 
-    /// Undoes last change if any, places the change in the redo list and evaluates the model if needed
+    /// Undoes last change if any, places the change in the redo list and evaluates the model if needed.
+    ///
+    /// Replay may fail after partial mutation. Applied value/ownership changes
+    /// invalidate the report and reconcile links/formatting from stored results
+    /// without calculating formulas. History-stack error behavior is unchanged.
     ///
     /// See also:
     /// * [UserModel::redo]
@@ -351,7 +355,9 @@ impl<'a> UserModel<'a> {
         Ok(())
     }
 
-    /// Redoes the last undone change, places the change in the undo list and evaluates the model if needed
+    /// Redoes the last undone change, places the change in the undo list and evaluates the model if needed.
+    ///
+    /// Partial replay failures use the stored-result cleanup described by [`Self::undo`].
     ///
     /// See also:
     /// * [UserModel::redo]
@@ -435,6 +441,9 @@ impl<'a> UserModel<'a> {
     /// that transition. Iteration-setting changes alone remain allowed while paused.
     /// The caller owns the payload and must retain it for retry after resolving
     /// the rejection. This model does not queue rejected batches internally.
+    /// Other failures may retain partial mutations; value/ownership writes then
+    /// invalidate reports and reconcile stored-result formatting and links
+    /// without calculating formulas or changing queue error semantics.
     ///
     /// This is used together with [flush_send_queue](UserModel::flush_send_queue) to keep two remote models in sync
     ///
