@@ -399,7 +399,7 @@ Workbook properties
    returns ``""`` for no color.
 
 Display history and failed replay
---------------------------------
+---------------------------------
 
 Local display supplements retain complete affected spill ownership and equal
 results required by formula recreation. Structural reference rewrites preserve
@@ -412,4 +412,7 @@ forks until a successful calculation. Cleanup reconciles dynamic links and
 conditional formatting from stored results without calculating formulas or
 refreshing an existing display timestamp. A rejected edit with no mutations or
 pending effects performs no cleanup. These rules do not roll back partial edits
-or change history-stack and outgoing-queue error behavior.
+or change history-stack and outgoing-queue error behavior. Merge-list ownership
+changes are tracked even when they write no cells. Replay removes or replaces a
+spill child only for its recorded affected owners; unrelated spill ownership is
+preserved. Runtime ownership supplements are not serialized.

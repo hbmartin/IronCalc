@@ -122,8 +122,14 @@ or disappears, plus their destinations and complete affected spill groups.
 Splitting or collapsing a spill captures identity-mapped children and vacant
 mapped positions too, so paused replay neither loses equal children nor leaves
 phantom spill values. Replay removes obsolete children before restoring anchors,
-children and links. An absent dynamic-link entry is retained when replay needs
-it to remove a temporarily remapped link, even if both completed states lack one.
+children and links. Runtime supplements authorize spill removal and replacement
+by owner separately for undo and redo, including temporary remapped owners.
+Vacant entries cannot delete children of unrelated arrays. A later calculation's
+new array extent, outside both recorded completed states, is retained with its
+children rather than replaced by an older extent. Remote conflicts retire their
+authorization with the affected group. An absent dynamic-link entry is retained
+when replay needs it to remove a temporarily remapped link, even if both
+completed states lack one.
 
 Identity restoration skips unchanged payloads. Unrelated equal caches are not
 retained in structural history. User formula replacement/recreation, including
@@ -135,18 +141,29 @@ without forcing equal caches into history; a paused structural undo therefore
 preserves current dependent values after a collaborator changes their inputs.
 Calculation and style writes continue omitting equal payloads. One journal entry
 holds the original cell, expected formula identity and replay metadata for each
-touched position, without a second per-position formula map. Spill ownership
-footprints are deduplicated within the edit. Merge operations transfer cached
-formula results and dynamic links to their anchor; paused autofill marks
+touched position, without a second per-position formula map. Storage captures
+original array groups before mutable access, replacement, removal or row
+replacement. User replacement declares recreation; low-level formula storage
+preserves its caller's explicit intent without silently substituting another.
+Reference rewrites do not force equal results into history. Spill ownership
+footprints are deduplicated within the edit; activity-only scopes skip history
+expansion. Finalization and replay resolve sheet IDs through one lookup map per
+operation. Merge operations transfer cached formula results and dynamic links to their anchor; paused autofill marks
 calculation out of date without running a pass.
 
 All outer edit scopes observe mutation activity, including raw batches and
 undo/redo/external replay that do not record local history. Unrecorded scopes
-release their observation after finalization and do not capture calculation
-results. A failed live batch may retain partial mutations; it does not roll them
-back or publish a completed undo/redo batch. Applied value/ownership writes
-invalidate reports and dependencies even when a later diff fails, reconcile
-orphaned dynamic links and rebuild conditional formatting from stored results.
+release their observation after mutation cleanup and before final calculation;
+formula calculation performs no journal lookup or locking in those scopes.
+Recorded journals remain attached through calculation and publication. A failed
+live batch may retain partial mutations; it does not roll them back or publish a
+completed undo/redo batch. Applied value/ownership writes
+invalidate reports and dependencies even when a later diff fails, including
+merge-list changes that write no cell. Identical merge lists remain no-ops.
+Failure cleanup reconciles orphaned dynamic links and rebuilds conditional
+formatting from stored results. Replayed theme and rule changes queue their
+formatting effect when applied, so a later failure cannot discard that redraw;
+these display-only changes retain the calculation report and dependencies.
 Cleanup runs no formula calculation and reuses an existing display timestamp.
 Rejected edits with no writes or pending effects skip cleanup and leave reports,
 dependencies, overlays, links and clocks unchanged. History and collaboration
@@ -415,3 +432,7 @@ only array ownership; operation counts are measured by test-only callers. The
 shared invalid-iteration binary fixture belongs to `base/tests/fixtures`; Rust
 and real-WASM tests read the same bytes. A native package smoke check verifies
 that the packaged base tests compile without the surrounding webapp checkout.
+The extracted crate is temporary; compilation honors `CARGO_TARGET_DIR` and
+otherwise shares the repository target directory so dependency artifacts remain
+cacheable. Python API documentation is also checked with Sphinx warnings treated
+as errors, using the normal documentation logo assets.
