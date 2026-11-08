@@ -358,21 +358,24 @@ impl<'a> UserModel<'a> {
             self.model.invalidate_calculation();
         }
         let view = self.get_selected_view();
-        let target_before = self.capture_area_values(
-            &Area {
-                sheet: view.sheet,
-                row: view.row,
-                column: view.column,
-                width: source_range.3 - source_range.1 + 1,
-                height: source_range.2 - source_range.0 + 1,
-            },
-            SpillCapture::Preserve,
-        )?;
+        let target_area = &Area {
+            sheet: view.sheet,
+            row: view.row,
+            column: view.column,
+            width: source_range.3 - source_range.1 + 1,
+            height: source_range.2 - source_range.0 + 1,
+        };
+        let target_before = self.capture_area_values(target_area, SpillCapture::Preserve)?;
         let mut diff_list = Vec::new();
         let mut cse_sources = HashMap::new();
         if is_cut {
             let (r1, c1, r2, c2) = source_range;
-            cse_sources = self.clipboard_cse_sources(source_sheet, (r1, c1, r2, c2))?;
+            let (sources, _visits) = self.clipboard_cse_sources(source_sheet, (r1, c1, r2, c2))?;
+            cse_sources = sources;
+            #[cfg(test)]
+            {
+                self.model.evaluation.display.cse_discovery_visits += _visits;
+            }
             for (&(row, column), &(width, height)) in &cse_sources {
                 self.clear_prepared_cse(source_sheet, row, column, width, height, &mut diff_list)?;
             }
@@ -398,14 +401,6 @@ impl<'a> UserModel<'a> {
         let (selected_row, selected_column) = (view.row, view.column);
         let mut max_row = selected_row;
         let mut max_column = selected_column;
-        let target_area = &Area {
-            sheet,
-            row: selected_row,
-            column: selected_column,
-            width: source_last_column - source_first_column + 1,
-            height: source_last_row - source_first_row + 1,
-        };
-
         // The merges of the copied area, captured before the containment
         // step below can remove target merges: when the paste overlaps its
         // own source, a source merge can also be a replaced target merge and
@@ -457,7 +452,6 @@ impl<'a> UserModel<'a> {
                     changes.push((
                         target_row,
                         target_column,
-                        None,
                         old_style,
                         None,
                         value.style.clone(),
@@ -482,7 +476,6 @@ impl<'a> UserModel<'a> {
                 changes.push((
                     target_row,
                     target_column,
-                    None,
                     old_style.clone(),
                     Some(new_value.clone()),
                     value.style.clone(),
@@ -503,7 +496,7 @@ impl<'a> UserModel<'a> {
             old_value: target_before,
         });
         // set the new values and styles
-        for (target_row, target_column, old_value, old_style, new_value, style) in changes {
+        for (target_row, target_column, old_style, new_value, style) in changes {
             if let Some(ref v) = new_value {
                 let source_position = (
                     source_first_row + target_row - selected_row,
@@ -521,7 +514,9 @@ impl<'a> UserModel<'a> {
                         v,
                         &mut diff_list,
                         styles,
+                        Some(&style),
                     )?;
+                    continue;
                 } else {
                     self.model.set_user_input_with_styles(
                         sheet,
@@ -535,7 +530,7 @@ impl<'a> UserModel<'a> {
                         row: target_row,
                         column: target_column,
                         new_value: v.clone(),
-                        old_value: Box::new(old_value),
+                        old_value: Box::new(None),
                     });
                 }
             }
@@ -782,6 +777,7 @@ impl<'a> UserModel<'a> {
                         &new_formula,
                         &mut diff_list,
                         styles,
+                        None,
                     )?;
                     // Formula rewriting preserves the displayed group until calculation.
                     continue;
@@ -968,18 +964,16 @@ impl<'a> UserModel<'a> {
     }
 
     pub(super) fn clipboard_cse_sources(
-        &mut self,
+        &self,
         sheet: u32,
         (r1, c1, r2, c2): ClipboardTuple,
-    ) -> Result<CseSources, String> {
+    ) -> Result<(CseSources, usize), String> {
         let ws = self.model.workbook.worksheet(sheet)?;
         let mut sources = HashMap::new();
+        let mut visits = 0;
         for row in r1..=r2 {
             for (column, cell) in ws.sheet_data.cells_in_row_between(row, c1, c2) {
-                #[cfg(test)]
-                {
-                    self.model.evaluation.display.cse_discovery_visits += 1;
-                }
+                visits += 1;
                 if let Cell::ArrayFormula {
                     kind: ArrayKind::Cse,
                     r,
@@ -990,7 +984,7 @@ impl<'a> UserModel<'a> {
                 }
             }
         }
-        Ok(sources)
+        Ok((sources, visits))
     }
 
     fn set_prepared_array(
@@ -999,6 +993,7 @@ impl<'a> UserModel<'a> {
         value: &str,
         diffs: &mut Vec<Diff>,
         styles: &crate::units::StyleResolver<'_>,
+        final_style: Option<&Style>,
     ) -> Result<(), String> {
         let Area {
             sheet,
@@ -1036,6 +1031,9 @@ impl<'a> UserModel<'a> {
             new_value: value.into(),
             old_values,
         });
+        if let Some(style) = final_style {
+            self.model.set_cell_style(sheet, row, column, style)?;
+        }
         diffs.push(Diff::SetCellStyle {
             sheet,
             row,

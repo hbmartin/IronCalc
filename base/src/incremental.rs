@@ -7,6 +7,7 @@ use crate::{
     model::Model,
     types::{CalculationFailure, CalculationReport},
 };
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -295,7 +296,9 @@ impl Model<'_> {
     }
 
     /// Recalculate after edits to cell values/formulas, supplying every edited
-    /// cell. Scalar clears performed by the model are included automatically.
+    /// cell. Scalar clears from [`Model::range_clear_contents`] and
+    /// [`Model::range_clear_all`] are included automatically. Other raw setters,
+    /// including `set_user_input(cell, "")`, still require explicit edit positions.
     /// Structural model APIs automatically invalidate the baseline.
     /// Direct workbook mutations still require a full evaluation.
     /// `None` means the full evaluation path was selected. Inspect
@@ -327,13 +330,21 @@ impl Model<'_> {
         if self.dependency_index.is_none() {
             self.build_dependency_index();
         }
-        let mut all_edits = edited.to_vec();
-        if let Some(pending) = self.evaluation.pending_scalar_clears.take() {
-            all_edits.extend(pending);
-        }
-        all_edits.sort_unstable();
-        all_edits.dedup();
-        let edited = all_edits.as_slice();
+        let all_edits = match self.evaluation.pending_scalar_clears.take() {
+            Some(pending) if !pending.is_empty() => {
+                #[cfg(test)]
+                {
+                    self.evaluation.display.incremental_edit_allocations += 1;
+                }
+                let mut combined = edited.to_vec();
+                combined.extend(pending);
+                combined.sort_unstable();
+                combined.dedup();
+                Cow::Owned(combined)
+            }
+            _ => Cow::Borrowed(edited),
+        };
+        let edited = all_edits.as_ref();
         let mut index = Arc::clone(self.dependency_index.as_ref()?);
         let structure_changed =
             edited.iter().any(

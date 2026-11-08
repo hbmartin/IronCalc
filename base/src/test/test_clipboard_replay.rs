@@ -573,10 +573,10 @@ fn cse_discovery_ignores_empty_rectangle_positions_and_unrelated_cells() {
     for r in 1..=1000 {
         raw.set_user_input(0, r, 200, "=1".into()).unwrap();
     }
-    let mut m = UserModel::from_model(raw);
-    let groups = m.clipboard_cse_sources(0, (1, 1, 10000, 100)).unwrap();
+    let m = UserModel::from_model(raw);
+    let (groups, visits) = m.clipboard_cse_sources(0, (1, 1, 10000, 100)).unwrap();
     assert_eq!(groups.len(), 2);
-    assert_eq!(m.model.evaluation.display.cse_discovery_visits, 3);
+    assert_eq!(visits, 3);
 }
 
 #[test]
