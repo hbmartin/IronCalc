@@ -16,7 +16,19 @@ export type RegionalSettingsSaveResult = {
   error: RegionalSettingsError | null;
   changed: boolean;
 };
-const formulaLanguages = new Set(["en", "es", "fr", "de", "it"]);
+const formulaLanguages = new Set(__IC_FORMULA_LANGUAGE_IDS__);
+
+// Rust/binding APIs still return strings. Match the complete canonical errors;
+// unrelated errors containing these words must use the unexpected-failure path.
+const rejectionCodes = new Map<string, RegionalSettingsError["code"]>([
+  ["Cannot change locale while evaluation is paused", "paused"],
+  ["Cannot change timezone while evaluation is paused", "paused"],
+  ["Cannot change calculation context while evaluation is paused", "paused"],
+  [
+    "Cannot change calculation context with invalid iterative calculation settings",
+    "invalid_iteration",
+  ],
+]);
 
 type RegionalModel = Pick<
   Model,
@@ -59,11 +71,7 @@ export function saveRegionalSettings(
     }
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause);
-    const code = detail.includes("paused")
-      ? "paused"
-      : detail.includes("invalid iterative calculation settings")
-        ? "invalid_iteration"
-        : "save_failed";
+    const code = rejectionCodes.get(detail) ?? "save_failed";
     error = { code, detail };
   }
   const after = [model.getLocale(), model.getTimezone(), model.getLanguage()];
