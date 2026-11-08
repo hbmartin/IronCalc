@@ -122,7 +122,11 @@ or disappears, plus their destinations and affected spill groups. Identity
 restoration skips unchanged payloads. Unrelated equal caches are not retained
 in structural history. Replay-sensitive display entries are retained even when the cached payload at a position
 compares equal: undo/redo first moves cells, so position equality alone cannot
-identify redundant history. Ordinary edits still omit equal payloads. Merge
+identify redundant history. Ordinary calculation and style writes still omit equal payloads. Formula
+replacement/recreation is tracked at cell storage, including identical formula
+text and delete/recreate operations. These writes retain equal results and
+associated spill/link ownership for paused replay; the journal distinguishes
+calculation-result writes through an owned scope that also unwinds safely. Merge
 operations transfer cached formula results and dynamic links to their anchor;
 paused autofill marks calculation out of date without running a pass.
 
@@ -314,9 +318,15 @@ setters provide input and permission validation; preparation never evaluates
 formulas or reads the clock. Metadata needed to resolve formulas/styles is
 copied, but unrelated cell storage is not. Unit inference shares the ordinary
 setter implementation and reads affected styles from the stage, with untouched
-styles read from the full original model. Inferred styles are explicit diffs.
+styles read from the full original model. Inferred styles are explicit diffs. Resolver forwarding includes signed-formula
+scalar fallbacks. Pasted CSE anchors record their final copied style once;
+dependent CSE rewrites retain their inferred-style diffs.
 Every observed cell or link write is checked against the prepared footprint
-before publication. Workbook-wide metadata copies and a broader read-through
+before publication. Footprint lookups use primary source/destination bounds and
+a deduplicated per-sheet spatial index, without expanding tall rectangles into
+individual rows. Complete manual-link validation still scans worksheet link
+maps, including untouched sheets: it catches direct metadata writes outside the
+cell journal. This cost is retained with the metadata-copy strategy. Workbook-wide metadata copies and a broader read-through
 staging redesign remain deferred; preparation is not constant-cost in workbook
 metadata size. Commit publishes the prepared cells,
 metadata and existing diffs without repeating fallible input validation. Rejected
@@ -341,15 +351,23 @@ still is not rebased. Missing remote runtime results are not synthesized.
 
 Scalar clears mark reports NotEvaluated and block forks while retaining an
 internal baseline and accumulated clear positions eligible for incremental
-evaluation. Report invalidation retires this baseline centrally. Structural, spill/array,
+evaluation. Report invalidation retires this baseline centrally. This automatic tracking
+covers `range_clear_contents` and `range_clear_all`; other raw setters, including
+`set_user_input(cell, "")`, require explicit incremental edit positions. Calls
+without pending clear positions borrow the caller's edit list; eligible range
+clear invalidation collects positions and detects arrays in one scan. Structural, spill/array,
 settings/resource-limit and failed-calculation invalidation remain conservative.
 Neutral and no-op edits do not carry pending formatting effects into later edits;
 recovery from an earlier panic is the exception that repairs formatting.
 Raw Model conditional-formatting mutations rebuild overlays without formula
-calculation or report invalidation. Actual priority swaps refresh; boundary
+calculation or report invalidation. Updates validate sheet and rule ownership
+before adding a differential format, so rejected updates do not alter saved styles. Actual priority swaps refresh; boundary
 no-ops do not. Failed live edits reconcile links and pending formatting from
 stored results without calculating; partial mutations retain existing error
-semantics. Isolated failed clipboard preparation still changes no live state.
+semantics. A failed edit can therefore leave a dependent formula's retained
+result out of date, with `NotEvaluated`; its formatting reflects that displayed
+result until calculation. Rejected no-op edits skip orphan-link scanning and
+formatting. Isolated failed clipboard preparation still changes no live state.
 Rewritten formulas and their array children/links retain equal cache supplements
 when replay would recreate them. Unrelated equal values remain filtered.
 
@@ -358,8 +376,12 @@ values are validated before the first setter. If an unexpected later setter
 fails, applied changes remain saved and redraw, while the drawer retains pending
 selections and displays a translated error. No combined settings API is added.
 Known rejections use exact canonical error strings; unexpected errors use the
-translated fallback. Formula-language IDs come from the engine generator JSON
-at build time, without bundling its formula translations or adding a binding API.
+translated fallback. Formula-language IDs come from a committed generated
+TypeScript module derived from the engine generator JSON, without bundling its
+formula translations or adding a binding API. Run `npm run generate:language-ids`
+in the workbook package to regenerate it. Build/check workflows detect stale
+output without rewriting it. Direct source imports need no Vite-injected globals
+or consumer configuration.
 Locale/timezone transition preflight rejects a whole incoming batch while paused
 or when enabled iteration settings are invalid at that transition; iteration
 setting changes alone remain allowed while paused. The Python retry example

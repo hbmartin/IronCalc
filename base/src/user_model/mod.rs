@@ -34,3 +34,7 @@ mod display_replay_tests;
 #[cfg(test)]
 #[path = "../test/test_clipboard_replay.rs"]
 mod clipboard_replay_tests;
+
+#[cfg(test)]
+#[path = "../test/test_formula_replay_follow_up.rs"]
+mod formula_replay_follow_up_tests;
