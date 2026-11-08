@@ -574,7 +574,9 @@ fn cse_discovery_ignores_empty_rectangle_positions_and_unrelated_cells() {
         raw.set_user_input(0, r, 200, "=1".into()).unwrap();
     }
     let m = UserModel::from_model(raw);
-    let (groups, visits) = m.clipboard_cse_sources(0, (1, 1, 10000, 100)).unwrap();
+    let before = crate::sheet_data::SheetData::cell_visits();
+    let groups = m.clipboard_cse_sources(0, (1, 1, 10000, 100)).unwrap();
+    let visits = crate::sheet_data::SheetData::cell_visits() - before;
     assert_eq!(groups.len(), 2);
     assert_eq!(visits, 3);
 }

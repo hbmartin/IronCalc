@@ -312,7 +312,10 @@ test("changed context batches produce the canonical real-WASM rejection", () => 
 
 test("permissively loaded invalid iteration settings use the real rejection contract", async () => {
   const bytes = await readFile(
-    new URL("./fixtures/invalid-iterations.ic", import.meta.url),
+    new URL(
+      "../../../base/tests/fixtures/invalid-iterations.ic",
+      import.meta.url,
+    ),
   );
   const model = Model.fromBytes(bytes, "en");
   const before = model.toBytes();

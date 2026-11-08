@@ -386,6 +386,7 @@ impl<'a> Model<'a> {
                 self.language,
             );
             if formula != formula_displaced {
+                let _writes = self.observe_writes(crate::display::WriteIntent::PreserveOwner);
                 self.update_cell_with_formula(sheet, row, column, format!("={formula_displaced}"))?;
             };
         }

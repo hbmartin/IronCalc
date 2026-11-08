@@ -84,6 +84,9 @@ impl<'s, 'a, T: DisplayEditTarget<'a>> DisplayEditGuard<'s, 'a, T> {
         self.target.edit_model().cancel_display_edit();
     }
     pub(crate) fn complete(mut self) {
+        if self.previous_depth == 0 {
+            self.target.edit_model().finish_display_activity();
+        }
         self.armed = false;
     }
 }
@@ -107,6 +110,8 @@ pub(crate) struct DisplayState {
     journal: Option<Arc<Mutex<MutationJournal>>>,
     #[cfg(test)]
     pub(crate) journal_positions: usize,
+    #[cfg(test)]
+    pub(crate) ownership_groups: usize,
     #[cfg(test)]
     pub(crate) link_cleanup_visits: usize,
     #[cfg(test)]
@@ -142,15 +147,47 @@ pub(crate) enum CachedCell {
     Spill(Cell),
 }
 
-/// One original image per touched position, shared by participating worksheets.
+/// Why a storage write occurs, independent of a formula's cached value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum WriteIntent {
+    #[default]
+    Edit,
+    Recreate,
+    PreserveOwner,
+    Calculation,
+    Style,
+    SpillShape,
+}
+
+type FormulaIdentity = Option<(i32, Option<ArrayKind>)>;
+#[derive(Debug)]
+struct JournalCell {
+    before: Option<Cell>,
+    expected_formula: FormulaIdentity,
+    compare_formula: bool,
+    replay: bool,
+}
+impl JournalCell {
+    fn new(cell: Option<&Cell>) -> Self {
+        Self {
+            before: cell.cloned(),
+            expected_formula: formula_identity(cell),
+            compare_formula: false,
+            replay: false,
+        }
+    }
+}
+
+/// One original image and ownership record per touched position.
 #[derive(Default, Debug)]
 pub(crate) struct MutationJournal {
-    cells: HashMap<Position, Option<CachedCell>>,
+    cells: HashMap<Position, JournalCell>,
     links: HashMap<Position, Option<Link>>,
-    replay_cells: HashSet<Position>,
     replay_links: HashSet<Position>,
-    formulas: HashMap<Position, Option<(i32, Option<ArrayKind>)>>,
-    calculation_depth: usize,
+    intent: WriteIntent,
+    history: bool,
+    content_written: bool,
+    ownership_groups: HashSet<(Position, i32, i32)>,
 }
 
 /// Cloning worksheet data never carries observation into the clone.
@@ -168,64 +205,55 @@ impl MutationObserver {
     pub(crate) fn active(&self) -> bool {
         self.journal.is_some()
     }
+    pub(crate) fn write_scope(&self, intent: WriteIntent) -> WriteIntentGuard {
+        WriteIntentGuard::new(self.journal.clone(), intent)
+    }
     pub(crate) fn capture(&self, row: i32, column: i32, cell: Option<&Cell>) {
-        if let Some(journal) = &self.journal {
-            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
-            let position = (self.sheet_id, row, column);
-            records
-                .formulas
-                .entry(position)
-                .or_insert_with(|| formula_identity(cell));
-            records
-                .cells
-                .entry(position)
-                .or_insert_with(|| cell.and_then(CachedCell::of));
+        let Some(journal) = &self.journal else { return };
+        let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+        let intent = records.intent;
+        if intent == WriteIntent::Calculation && !records.history {
+            return;
         }
+        let entry = records
+            .cells
+            .entry((self.sheet_id, row, column))
+            .or_insert_with(|| JournalCell::new(cell));
+        // Check earlier mutable-cell writes before a new scope takes over.
+        if entry.compare_formula && entry.expected_formula != formula_identity(cell) {
+            entry.replay = true;
+        }
+        entry.expected_formula = formula_identity(cell);
+        entry.compare_formula = matches!(intent, WriteIntent::Edit | WriteIntent::Recreate);
+    }
+    pub(crate) fn removal(&self, row: i32, column: i32, old: Option<&Cell>) {
+        self.replacement(row, column, old, &Cell::default());
     }
     pub(crate) fn replacement(&self, row: i32, column: i32, old: Option<&Cell>, new: &Cell) {
         self.capture(row, column, old);
-        let Some(journal) = &self.journal else {
-            return;
-        };
+        let Some(journal) = &self.journal else { return };
         let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
-        if records.calculation_depth != 0 {
-            return;
-        }
-        let formula = match new {
-            Cell::CellFormula { v, .. } | Cell::ArrayFormula { v, .. } => {
-                matches!(v, FormulaValue::Unevaluated)
-                    || formula_identity(old) != formula_identity(Some(new))
-            }
-            _ => false,
-        };
-        if !formula {
-            return;
-        }
-        let position = (self.sheet_id, row, column);
-        // Include the original group even when preparation already collapsed it.
-        let mut extents = vec![(1, 1)];
-        if let Some(Some(CachedCell::Formula(_, Some((_, extent))))) = records.cells.get(&position)
+        let intent = records.intent;
+        if !matches!(intent, WriteIntent::Calculation | WriteIntent::Style)
+            && !same_cell_content(old, Some(new))
         {
-            extents.push(*extent);
+            records.content_written = true;
         }
-        for cell in old.into_iter().chain(std::iter::once(new)) {
-            if let Cell::ArrayFormula { r, .. } = cell {
-                extents.push(*r);
-            }
+        let Some(entry) = records.cells.get_mut(&(self.sheet_id, row, column)) else {
+            return;
+        };
+        let identity = formula_identity(Some(new));
+        if identity.is_some()
+            && (intent == WriteIntent::Recreate
+                || (intent == WriteIntent::Edit && identity != formula_identity(old)))
+        {
+            entry.replay = true;
         }
-        extents.sort_unstable();
-        extents.dedup();
-        for (width, height) in extents {
-            for r in row..row.saturating_add(height) {
-                for c in column..column.saturating_add(width) {
-                    records.replay_cells.insert((self.sheet_id, r, c));
-                    records.replay_links.insert((self.sheet_id, r, c));
-                }
-            }
-        }
+        entry.expected_formula = identity;
+        entry.compare_formula = false;
     }
 }
-fn formula_identity(cell: Option<&Cell>) -> Option<(i32, Option<ArrayKind>)> {
+fn formula_identity(cell: Option<&Cell>) -> FormulaIdentity {
     match cell? {
         Cell::CellFormula { f, .. } => Some((*f, None)),
         Cell::ArrayFormula { f, kind, .. } => Some((*f, Some(kind.clone()))),
@@ -233,16 +261,30 @@ fn formula_identity(cell: Option<&Cell>) -> Option<(i32, Option<ArrayKind>)> {
     }
 }
 
-/// Calculation still journals result changes, but never marks formula recreation.
+/// Nested write intents restore their predecessor during normal return or unwind.
 #[must_use]
-pub(crate) struct CalculationWritesGuard(Option<Arc<Mutex<MutationJournal>>>);
-impl Drop for CalculationWritesGuard {
+pub(crate) struct WriteIntentGuard(Option<Arc<Mutex<MutationJournal>>>, WriteIntent);
+impl WriteIntentGuard {
+    fn new(journal: Option<Arc<Mutex<MutationJournal>>>, intent: WriteIntent) -> Self {
+        let previous = journal.as_ref().map_or(WriteIntent::Edit, |journal| {
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            // Internal reference rewrites preserve ownership even through setters.
+            let intent = if intent == WriteIntent::Recreate
+                && !matches!(records.intent, WriteIntent::Edit | WriteIntent::Recreate)
+            {
+                WriteIntent::PreserveOwner
+            } else {
+                intent
+            };
+            std::mem::replace(&mut records.intent, intent)
+        });
+        Self(journal, previous)
+    }
+}
+impl Drop for WriteIntentGuard {
     fn drop(&mut self) {
         if let Some(journal) = &self.0 {
-            journal
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .calculation_depth -= 1;
+            journal.lock().unwrap_or_else(|e| e.into_inner()).intent = self.1;
         }
     }
 }
@@ -284,19 +326,25 @@ impl Model<'_> {
         StoredReadsGuard(flag, previous)
     }
 
-    pub(crate) fn observe_calculation_writes(&self) -> CalculationWritesGuard {
-        let journal = self.evaluation.display.journal.clone();
-        if let Some(journal) = &journal {
-            journal
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .calculation_depth += 1;
-        }
-        CalculationWritesGuard(journal)
+    pub(crate) fn observe_writes(&self, intent: WriteIntent) -> WriteIntentGuard {
+        WriteIntentGuard::new(self.evaluation.display.journal.clone(), intent)
+    }
+
+    pub(crate) fn observe_calculation_writes(&self) -> WriteIntentGuard {
+        self.observe_writes(WriteIntent::Calculation)
     }
 
     pub(crate) fn start_display_journal(&mut self) {
-        debug_assert!(self.evaluation.display.journal.is_none());
+        self.start_display_activity();
+        if let Some(journal) = &self.evaluation.display.journal {
+            journal.lock().unwrap_or_else(|e| e.into_inner()).history = true;
+        }
+    }
+
+    fn start_display_activity(&mut self) {
+        if self.evaluation.display.journal.is_some() {
+            return;
+        }
         let journal = Arc::new(Mutex::new(MutationJournal::default()));
         for ws in &mut self.workbook.worksheets {
             ws.sheet_data.observe(MutationObserver {
@@ -305,6 +353,25 @@ impl Model<'_> {
             });
         }
         self.evaluation.display.journal = Some(journal);
+    }
+
+    fn detach_display_activity(&mut self) {
+        self.evaluation.display.journal = None;
+        for ws in &mut self.workbook.worksheets {
+            ws.sheet_data.observe(MutationObserver::default());
+        }
+    }
+
+    fn finish_display_activity(&mut self) {
+        if self
+            .evaluation
+            .display
+            .journal
+            .as_ref()
+            .is_some_and(|j| !j.lock().unwrap_or_else(|e| e.into_inner()).history)
+        {
+            self.detach_display_activity();
+        }
     }
 
     pub(crate) fn register_display_sheet(&mut self, sheet: u32, added: bool) {
@@ -317,7 +384,10 @@ impl Model<'_> {
         if added {
             let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
             for (row, col, _) in ws.sheet_data.cells() {
-                records.cells.entry((ws.sheet_id, row, col)).or_insert(None);
+                records
+                    .cells
+                    .entry((ws.sheet_id, row, col))
+                    .or_insert_with(|| JournalCell::new(None));
             }
         }
         ws.sheet_data.observe(MutationObserver {
@@ -341,7 +411,7 @@ impl Model<'_> {
         for ws in &mut self.workbook.worksheets {
             ws.sheet_data.observe(MutationObserver::default());
         }
-        let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+        let records = journal.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg(test)]
         {
             self.evaluation.display.journal_positions = records.cells.len();
@@ -353,48 +423,44 @@ impl Model<'_> {
             .enumerate()
             .map(|(index, ws)| (ws.sheet_id, index))
             .collect();
-        let records_formulas = std::mem::take(&mut records.formulas);
-        let mut replay_cells = std::mem::take(&mut records.replay_cells);
-        let mut replay_links = std::mem::take(&mut records.replay_links);
-        for (position, original) in records_formulas {
-            let current = sheets
-                .get(&position.0)
-                .and_then(|&i| self.workbook.worksheets[i].cell(position.1, position.2));
-            if original != formula_identity(current.as_deref()) && !replay_cells.contains(&position)
-            {
-                let mut extents = vec![(1, 1)];
-                if let Some(Some(CachedCell::Formula(_, Some((_, extent))))) =
-                    records.cells.get(&position)
-                {
-                    extents.push(*extent);
-                }
-                if let Some(Cell::ArrayFormula { r, .. }) = current.as_deref() {
-                    extents.push(*r);
-                }
-                for (width, height) in extents {
-                    for row in position.1..position.1.saturating_add(height) {
-                        for column in position.2..position.2.saturating_add(width) {
-                            replay_cells.insert((position.0, row, column));
-                            replay_links.insert((position.0, row, column));
-                        }
-                    }
-                }
-            }
+        let owners: Vec<_> = records
+            .cells
+            .iter()
+            .filter_map(|(&p, entry)| {
+                let current = sheets
+                    .get(&p.0)
+                    .and_then(|&i| self.workbook.worksheets[i].cell(p.1, p.2));
+                ((entry.replay
+                    && (formula_identity(entry.before.as_ref()).is_some()
+                        || formula_identity(current.as_deref()).is_some()))
+                    || (entry.compare_formula
+                        && entry.expected_formula != formula_identity(current.as_deref())))
+                .then_some(p)
+            })
+            .collect();
+        drop(records);
+        for position in owners {
+            self.retain_display_ownership(&journal, position);
+        }
+        let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        {
+            self.evaluation.display.ownership_groups = records.ownership_groups.len();
         }
         let cells = records
             .cells
             .drain()
-            .filter_map(|(p, before)| {
+            .filter_map(|(p, entry)| {
+                let before = entry.before.as_ref().and_then(CachedCell::of);
                 let after = sheets
                     .get(&p.0)
                     .and_then(|&i| self.workbook.worksheets[i].cell(p.1, p.2))
                     .as_deref()
                     .and_then(CachedCell::of);
-                (before != after
-                    || (replay_cells.contains(&p) && (before.is_some() || after.is_some())))
-                .then_some((p, before, after))
+                (before != after || entry.replay).then_some((p, before, after))
             })
             .collect();
+        let replay_links = std::mem::take(&mut records.replay_links);
         let links = records
             .links
             .drain()
@@ -403,9 +469,7 @@ impl Model<'_> {
                     .get(&p.0)
                     .and_then(|&i| self.links.get(&(i as u32, p.1, p.2)))
                     .cloned();
-                (before != after
-                    || (replay_links.contains(&p) && (before.is_some() || after.is_some())))
-                .then_some((p, before, after))
+                (before != after || replay_links.contains(&p)).then_some((p, before, after))
             })
             .collect();
         DisplayDelta { cells, links }
@@ -449,13 +513,82 @@ impl Model<'_> {
             })
             .collect()
     }
-    pub(crate) fn retain_prepared_replay(&self, delta: &DisplayDelta) {
+    /// Capture before any spill collapse; also used for ownership inferred at publication.
+    fn retain_display_ownership(&self, journal: &Arc<Mutex<MutationJournal>>, position: Position) {
+        let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+        let sheet = self.get_sheet_index_by_sheet_id(position.0);
+        let cell_at = |p: Position| {
+            self.get_sheet_index_by_sheet_id(p.0).and_then(|s| {
+                self.workbook.worksheets[s as usize]
+                    .cell(p.1, p.2)
+                    .map(std::borrow::Cow::into_owned)
+            })
+        };
+        let current = cell_at(position);
+        let original = records.cells.get(&position).and_then(|e| e.before.as_ref());
+        let mut extents = vec![(1, 1)];
+        for cell in original.into_iter().chain(current.as_ref()) {
+            if let Cell::ArrayFormula { r, .. } = cell {
+                extents.push(*r);
+            }
+        }
+        extents.sort_unstable();
+        extents.dedup();
+        for (width, height) in extents {
+            if !records.ownership_groups.insert((position, width, height)) {
+                continue;
+            }
+            for row in position.1..position.1.saturating_add(height) {
+                for column in position.2..position.2.saturating_add(width) {
+                    let p = (position.0, row, column);
+                    records
+                        .cells
+                        .entry(p)
+                        .or_insert_with(|| JournalCell::new(cell_at(p).as_ref()))
+                        .replay = true;
+                }
+            }
+        }
+        // Formula replay may remove an equal link, including an absent one.
+        records.replay_links.insert(position);
+        records.links.entry(position).or_insert_with(|| {
+            sheet.and_then(|s| self.links.get(&(s, position.1, position.2)).cloned())
+        });
+    }
+
+    pub(crate) fn retain_spill_ownership(&self, sheet: u32, row: i32, column: i32) {
+        if let (Some(journal), Some(ws)) = (
+            &self.evaluation.display.journal,
+            self.workbook.worksheets.get(sheet as usize),
+        ) {
+            self.retain_display_ownership(journal, (ws.sheet_id, row, column));
+        }
+    }
+
+    fn mark_replay_positions(&self, positions: impl IntoIterator<Item = Position>) {
         if let Some(journal) = &self.evaluation.display.journal {
             let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
-            records
-                .replay_cells
-                .extend(delta.cells.iter().map(|(p, _, _)| *p));
-            records
+            for p in positions {
+                records
+                    .cells
+                    .entry(p)
+                    .or_insert_with(|| {
+                        let cell = self
+                            .get_sheet_index_by_sheet_id(p.0)
+                            .and_then(|s| self.workbook.worksheets[s as usize].cell(p.1, p.2));
+                        JournalCell::new(cell.as_deref())
+                    })
+                    .replay = true;
+            }
+        }
+    }
+
+    pub(crate) fn retain_prepared_replay(&self, delta: &DisplayDelta) {
+        self.mark_replay_positions(delta.cells.iter().map(|(p, _, _)| *p));
+        if let Some(journal) = &self.evaluation.display.journal {
+            journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
                 .replay_links
                 .extend(delta.links.iter().map(|(p, _, _)| *p));
         }
@@ -493,6 +626,9 @@ impl Model<'_> {
     }
 
     pub(crate) fn begin_display_edit(&mut self) {
+        if self.evaluation.display.edit_depth == 0 {
+            self.start_display_activity();
+        }
         self.evaluation.display.edit_depth += 1;
     }
 
@@ -511,18 +647,26 @@ impl Model<'_> {
         }
         let requested = std::mem::take(&mut self.evaluation.display.calculation_requested);
         let formatting = std::mem::take(&mut self.evaluation.display.formatting_requested);
-        let touched = self
-            .evaluation
-            .display
-            .journal
-            .as_ref()
-            .is_some_and(|journal| {
-                !journal
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .cells
-                    .is_empty()
-            });
+        let touched = (!recover || (!requested && !formatting))
+            && self
+                .evaluation
+                .display
+                .journal
+                .as_ref()
+                .is_some_and(|journal| {
+                    let records = journal.lock().unwrap_or_else(|e| e.into_inner());
+                    records.content_written
+                        || records.cells.iter().any(|(p, entry)| {
+                            let current = self
+                                .get_sheet_index_by_sheet_id(p.0)
+                                .and_then(|s| self.workbook.worksheets[s as usize].cell(p.1, p.2));
+                            !same_cell_content(entry.before.as_ref(), current.as_deref())
+                        })
+                });
+        if !recover && touched {
+            self.invalidate_calculation();
+            self.evaluation.display.formatting_requested = false;
+        }
         // Rejected no-op edits have no orphan owners or overlays to reconcile.
         if !requested && !formatting && !touched {
             if recover && self.evaluation.display.formatting_recovery {
@@ -563,7 +707,10 @@ impl Model<'_> {
         }
         if calculate && requested {
             self.evaluate();
-        } else if formatting || (recover && self.evaluation.display.formatting_recovery) {
+        } else if formatting
+            || (!recover && touched)
+            || (recover && self.evaluation.display.formatting_recovery)
+        {
             self.evaluate_conditional_formatting();
         }
     }
@@ -693,7 +840,16 @@ impl Model<'_> {
     }
 
     pub(crate) fn apply_display_delta(&mut self, delta: &DisplayDelta, undo: bool) {
-        for (key, before, after) in &delta.cells {
+        let mut cells: Vec<_> = delta.cells.iter().collect();
+        cells.sort_unstable_by_key(|(key, before, after)| {
+            let rank = match if undo { before } else { after } {
+                None => 0,
+                Some(CachedCell::Formula(..)) => 1,
+                Some(CachedCell::Spill(..)) => 2,
+            };
+            (rank, *key)
+        });
+        for (key, before, after) in cells {
             let Some(sheet) = self
                 .workbook
                 .worksheets
@@ -771,17 +927,16 @@ impl Model<'_> {
         before: DisplaySnapshot,
         map: impl Fn(Position) -> Option<Position>,
     ) {
-        // Cuts remap outside a structural scope: retain their replay positions too.
+        // Ownership moves need before/after entries even when their payloads compare equal.
+        self.mark_replay_positions(before.cells.keys().flat_map(|&p| {
+            (map(p) != Some(p))
+                .then_some([Some(p), map(p)])
+                .into_iter()
+                .flatten()
+                .flatten()
+        }));
         if let Some(journal) = &self.evaluation.display.journal {
             let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
-            for &p in before.cells.keys() {
-                if map(p) != Some(p) {
-                    records.replay_cells.insert(p);
-                    if let Some(target) = map(p) {
-                        records.replay_cells.insert(target);
-                    }
-                }
-            }
             for &p in before.links.keys() {
                 if map(p) != Some(p) {
                     records.replay_links.insert(p);
@@ -819,6 +974,25 @@ impl Model<'_> {
                 }
             }
         }
+        // Splitting a group affects identity-mapped children and vacant destinations too.
+        let mut affected = HashSet::new();
+        for (&anchor, cached) in &before.cells {
+            if let CachedCell::Formula(_, Some((_, (width, height)))) = cached {
+                if groups.get(&anchor).is_some_and(|g| g.1) {
+                    continue;
+                }
+                for row in anchor.1..anchor.1.saturating_add(*height) {
+                    for column in anchor.2..anchor.2.saturating_add(*width) {
+                        let p = (anchor.0, row, column);
+                        affected.insert(p);
+                        if let Some(target) = map(p) {
+                            affected.insert(target);
+                        }
+                    }
+                }
+            }
+        }
+        self.mark_replay_positions(affected);
         // A cut may leave old spill children in place. Remove every child of a
         // broken group, including surviving fragments, before restoring intact groups.
         for (&position, cached) in &before.cells {
@@ -1045,6 +1219,10 @@ impl Model<'_> {
         {
             self.evaluation.display.spill_owner_visits += visits;
         }
+        for &(row, column, _, _) in &anchors {
+            self.retain_spill_ownership(area.sheet, row, column);
+        }
+        let _writes = self.observe_writes(WriteIntent::SpillShape);
         let ws = self.workbook.worksheet_mut(area.sheet)?;
         for (row, column, width, height) in anchors {
             for r in row..row + height {
@@ -1177,6 +1355,26 @@ impl DisplayDelta {
                 })
         }) || self.links.iter().any(|(p, _, _)| conflicts.contains(*p))
     }
+}
+
+fn same_cell_content(before: Option<&Cell>, after: Option<&Cell>) -> bool {
+    if before == after {
+        return true;
+    }
+    if let (Some(before), Some(after)) = (before, after) {
+        if before.get_style() == after.get_style() {
+            return false;
+        }
+    }
+    let normalized = |cell: Option<&Cell>| {
+        cell.filter(|c| !matches!(c, Cell::EmptyCell { .. }))
+            .map(|cell| {
+                let mut cell = cell.clone();
+                cell.set_style(0);
+                cell
+            })
+    };
+    normalized(before) == normalized(after)
 }
 
 #[cfg(test)]

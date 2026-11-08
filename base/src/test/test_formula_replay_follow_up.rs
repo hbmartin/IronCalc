@@ -387,7 +387,7 @@ fn pasted_cse_anchors_publish_one_final_style_diff() {
 
 #[test]
 fn invalid_iteration_wasm_fixture_has_expected_settings_and_round_trips() {
-    let bytes = include_bytes!("../../../webapp/IronCalc/tests/fixtures/invalid-iterations.ic");
+    let bytes = include_bytes!("../../tests/fixtures/invalid-iterations.ic");
     let workbook: Workbook = bitcode::decode(bytes).unwrap();
     assert!(workbook.settings.iterative_calculation.enabled);
     assert_eq!(

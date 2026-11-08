@@ -75,6 +75,16 @@ impl SheetData {
         CELL_VISITS.with(std::cell::Cell::get)
     }
 
+    pub(crate) fn formula_writes(&self) -> crate::display::WriteIntentGuard {
+        self.observer
+            .write_scope(crate::display::WriteIntent::Recreate)
+    }
+
+    pub(crate) fn style_writes(&self) -> crate::display::WriteIntentGuard {
+        self.observer
+            .write_scope(crate::display::WriteIntent::Style)
+    }
+
     pub(crate) fn observe(&mut self, observer: MutationObserver) {
         self.observer = observer;
     }
@@ -162,7 +172,10 @@ impl SheetData {
 
     /// Removes the cell at a position and returns it.
     pub fn remove_cell(&mut self, row: i32, column: i32) -> Option<Cell> {
-        self.capture(row, column);
+        if self.observer.active() {
+            self.observer
+                .removal(row, column, self.cell(row, column).as_deref());
+        }
         let row_data = self.row_mut(row)?;
         let cell = row_data.remove(column)?;
         if row_data.is_empty() {
@@ -257,7 +270,7 @@ impl SheetData {
     pub fn remove_row(&mut self, row: i32) {
         if self.observer.active() {
             for (c, cell) in self.cells_in_row(row) {
-                self.observer.capture(row, c, Some(&cell));
+                self.observer.removal(row, c, Some(&cell));
             }
         }
         let Some((chunk_index, index)) = locate(row) else {
@@ -300,7 +313,14 @@ impl SheetData {
         cells.shrink_to_fit();
         if self.observer.active() {
             for (c, cell) in self.cells_in_row(row) {
-                self.observer.capture(row, c, Some(&cell));
+                if cells
+                    .binary_search_by_key(&c, |(column, _)| *column)
+                    .is_err()
+                {
+                    self.observer.removal(row, c, Some(&cell));
+                } else {
+                    self.observer.capture(row, c, Some(&cell));
+                }
             }
             for (c, cell) in &cells {
                 self.observer

@@ -2474,6 +2474,7 @@ impl<'a> Model<'a> {
         row: i32,
         column: i32,
     ) -> Result<(), String> {
+        let _writes = self.observe_writes(crate::display::WriteIntent::SpillShape);
         if self.workbook.worksheet(sheet)?.is_covered_cell(row, column) {
             return Err("Cannot edit a cell that is part of a merged cell".to_string());
         }
@@ -2491,6 +2492,7 @@ impl<'a> Model<'a> {
                 }
             }
             CellStructure::DynamicFormula { range } => {
+                self.retain_spill_ownership(sheet, row, column);
                 // clear the spill of the dynamic formula
                 let (width, height) = range;
                 let ws = self.workbook.worksheet_mut(sheet)?;
@@ -2509,6 +2511,7 @@ impl<'a> Model<'a> {
                 // We can write in it but we need to clear the spill and reset the anchor
                 // while retaining its cached value until the next calculation.
                 let (anchor_row, anchor_column) = anchor;
+                self.retain_spill_ownership(sheet, anchor_row, anchor_column);
                 let (width, height) = range;
                 let ws = self.workbook.worksheet_mut(sheet)?;
                 // Extract formula index and style from the anchor before mutating
@@ -2619,6 +2622,7 @@ impl<'a> Model<'a> {
         value: String,
         styles: &crate::units::StyleResolver<'_>,
     ) -> Result<(), String> {
+        let _writes = self.observe_writes(crate::display::WriteIntent::Recreate);
         // first we make sure we can write in the cell and clear the spills.
         self.prepare_cell_for_user_input(sheet, row, column)?;
         if value.is_empty() {
