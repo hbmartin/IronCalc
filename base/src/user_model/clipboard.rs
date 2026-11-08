@@ -50,6 +50,7 @@ pub struct Clipboard {
 type FormulaUpdate = (u32, i32, i32, String);
 type NameUpdate = (String, Option<u32>, String, String);
 type FormattingUpdate = (u32, usize, String, CfRule);
+type CseSources = HashMap<(i32, i32), (i32, i32)>;
 
 /// Only validated input reaches the mutating phase. No formulas run in planning.
 pub(super) struct ClipboardPastePlan {
@@ -57,6 +58,13 @@ pub(super) struct ClipboardPastePlan {
     pub(super) formula_updates: Vec<FormulaUpdate>,
     name_updates: Vec<NameUpdate>,
     formatting_updates: Vec<FormattingUpdate>,
+}
+
+/// Encoded ordinary array edits omit transient children; clipboard history
+/// captures whole groups so a paused undo can restore their original ownership.
+pub(super) enum SpillCapture {
+    Omit,
+    Preserve,
 }
 
 impl<'a> UserModel<'a> {
@@ -337,6 +345,7 @@ impl<'a> UserModel<'a> {
         clipboard: &ClipboardData,
         is_cut: bool,
         mut plan: ClipboardPastePlan,
+        styles: &crate::units::StyleResolver<'_>,
     ) -> Result<(), String> {
         let retained_cut = is_cut.then(|| self.model.display_snapshot());
         if let Some(before) = &retained_cut {
@@ -348,32 +357,39 @@ impl<'a> UserModel<'a> {
             // Invalidate before any mutation, including while evaluation is paused.
             self.model.invalidate_calculation();
         }
+        let view = self.get_selected_view();
+        let target_before = self.capture_area_values(
+            &Area {
+                sheet: view.sheet,
+                row: view.row,
+                column: view.column,
+                width: source_range.3 - source_range.1 + 1,
+                height: source_range.2 - source_range.0 + 1,
+            },
+            SpillCapture::Preserve,
+        )?;
         let mut diff_list = Vec::new();
         let mut cse_sources = HashMap::new();
         if is_cut {
             let (r1, c1, r2, c2) = source_range;
-            for row in r1..=r2 {
-                for column in c1..=c2 {
-                    if let Some(Cell::ArrayFormula {
-                        kind: ArrayKind::Cse,
-                        r: (w, h),
-                        ..
-                    }) = self
-                        .model
-                        .workbook
-                        .worksheet(source_sheet)?
-                        .cell(row, column)
-                        .as_deref()
-                    {
-                        cse_sources.insert((row, column), (*w, *h));
-                    }
-                }
-            }
+            cse_sources = self.clipboard_cse_sources(source_sheet, (r1, c1, r2, c2))?;
             for (&(row, column), &(width, height)) in &cse_sources {
                 self.clear_prepared_cse(source_sheet, row, column, width, height, &mut diff_list)?;
             }
         }
-        let view = self.get_selected_view();
+        // Index each source row once, rather than scanning all groups per cell.
+        let mut cse_rows: HashMap<i32, Vec<(i32, i32)>> = HashMap::new();
+        for (&(row, column), &(width, height)) in &cse_sources {
+            for r in row..row + height {
+                cse_rows
+                    .entry(r)
+                    .or_default()
+                    .push((column, column + width));
+            }
+        }
+        for spans in cse_rows.values_mut() {
+            spans.sort_unstable();
+        }
         let (source_first_row, source_first_column, source_last_row, source_last_column) =
             source_range;
         let sheet = view.sheet;
@@ -460,20 +476,13 @@ impl<'a> UserModel<'a> {
                     .remove(&(*source_row, *source_column))
                     .ok_or_else(|| "Missing prepared clipboard cell".to_string())?;
 
-                let old_value = self
-                    .model
-                    .workbook
-                    .worksheet(sheet)?
-                    .cell(target_row, target_column)
-                    .map(Cow::into_owned);
-
                 let old_style =
                     self.model
                         .get_cell_style_or_none(sheet, target_row, target_column)?;
                 changes.push((
                     target_row,
                     target_column,
-                    old_value.clone(),
+                    None,
                     old_style.clone(),
                     Some(new_value.clone()),
                     value.style.clone(),
@@ -485,6 +494,14 @@ impl<'a> UserModel<'a> {
         diff_list.extend(self.range_link_diffs(target_area)?);
         // clear the whole area (this resets array formulas)
         self.model.range_clear_contents(target_area)?;
+        diff_list.push(Diff::RangeClearContents {
+            sheet,
+            row: target_area.row,
+            column: target_area.column,
+            width: target_area.width,
+            height: target_area.height,
+            old_value: target_before,
+        });
         // set the new values and styles
         for (target_row, target_column, old_value, old_style, new_value, style) in changes {
             if let Some(ref v) = new_value {
@@ -503,10 +520,16 @@ impl<'a> UserModel<'a> {
                         },
                         v,
                         &mut diff_list,
+                        styles,
                     )?;
                 } else {
-                    self.model
-                        .set_user_input(sheet, target_row, target_column, v.clone())?;
+                    self.model.set_user_input_with_styles(
+                        sheet,
+                        target_row,
+                        target_column,
+                        v.clone(),
+                        styles,
+                    )?;
                     diff_list.push(Diff::SetCellValue {
                         sheet,
                         row: target_row,
@@ -624,8 +647,9 @@ impl<'a> UserModel<'a> {
                     if (source_sheet == sheet) && seen_cells.contains(&(row, column)) {
                         continue;
                     }
-                    let cse_cleared = cse_sources.iter().any(|(&(r, c), &(w, h))| {
-                        row >= r && row < r + h && column >= c && column < c + w
+                    let cse_cleared = cse_rows.get(&row).is_some_and(|spans| {
+                        let i = spans.partition_point(|&(start, _)| start <= column);
+                        i > 0 && column < spans[i - 1].1
                     });
                     if cse_cleared {
                         let old_style =
@@ -732,6 +756,17 @@ impl<'a> UserModel<'a> {
                     .worksheet(ext_sheet)?
                     .cell(ext_row, ext_col)
                     .map(Cow::into_owned);
+                let (width, height) = match &old_cell {
+                    Some(Cell::ArrayFormula { r, .. }) => *r,
+                    _ => (1, 1),
+                };
+                self.model.retain_formula_replay(&Area {
+                    sheet: ext_sheet,
+                    row: ext_row,
+                    column: ext_col,
+                    width,
+                    height,
+                });
                 if let Some(Cell::ArrayFormula {
                     kind: ArrayKind::Cse,
                     r: (w, h),
@@ -757,18 +792,36 @@ impl<'a> UserModel<'a> {
                         },
                         &new_formula,
                         &mut diff_list,
+                        styles,
                     )?;
                     // Formula rewriting preserves the displayed group until calculation.
                     continue;
                 }
-                self.model
-                    .set_user_input(ext_sheet, ext_row, ext_col, new_formula.clone())?;
+                let old_style = self
+                    .model
+                    .get_cell_style_or_none(ext_sheet, ext_row, ext_col)?;
+                self.model.set_user_input_with_styles(
+                    ext_sheet,
+                    ext_row,
+                    ext_col,
+                    new_formula.clone(),
+                    styles,
+                )?;
                 diff_list.push(Diff::SetCellValue {
                     sheet: ext_sheet,
                     row: ext_row,
                     column: ext_col,
                     new_value: new_formula,
                     old_value: Box::new(old_cell),
+                });
+                diff_list.push(Diff::SetCellStyle {
+                    sheet: ext_sheet,
+                    row: ext_row,
+                    column: ext_col,
+                    old_value: Box::new(old_style),
+                    new_value: Box::new(
+                        self.model.get_style_for_cell(ext_sheet, ext_row, ext_col)?,
+                    ),
                 });
             }
             // Update defined names whose references land inside the moved area.
@@ -925,11 +978,38 @@ impl<'a> UserModel<'a> {
         Ok(())
     }
 
+    pub(super) fn clipboard_cse_sources(
+        &mut self,
+        sheet: u32,
+        (r1, c1, r2, c2): ClipboardTuple,
+    ) -> Result<CseSources, String> {
+        let ws = self.model.workbook.worksheet(sheet)?;
+        let mut sources = HashMap::new();
+        for row in r1..=r2 {
+            for (column, cell) in ws.sheet_data.cells_in_row_between(row, c1, c2) {
+                #[cfg(test)]
+                {
+                    self.model.evaluation.display.cse_discovery_visits += 1;
+                }
+                if let Cell::ArrayFormula {
+                    kind: ArrayKind::Cse,
+                    r,
+                    ..
+                } = &*cell
+                {
+                    sources.insert((row, column), *r);
+                }
+            }
+        }
+        Ok(sources)
+    }
+
     fn set_prepared_array(
         &mut self,
         area: &Area,
         value: &str,
         diffs: &mut Vec<Diff>,
+        styles: &crate::units::StyleResolver<'_>,
     ) -> Result<(), String> {
         let Area {
             sheet,
@@ -954,9 +1034,10 @@ impl<'a> UserModel<'a> {
                 new_value: without.clone(),
             });
         }
-        let old_values = self.array_old_values(sheet, row, column, width, height)?;
+        let old_values = self.capture_area_values(area, SpillCapture::Preserve)?;
+        let old_style = self.model.get_cell_style_or_none(sheet, row, column)?;
         self.model
-            .set_user_array_formula(sheet, row, column, width, height, value)?;
+            .set_user_array_formula_with_styles(area, value, styles)?;
         diffs.push(Diff::SetArrayValue {
             sheet,
             row,
@@ -965,6 +1046,13 @@ impl<'a> UserModel<'a> {
             height,
             new_value: value.into(),
             old_values,
+        });
+        diffs.push(Diff::SetCellStyle {
+            sheet,
+            row,
+            column,
+            old_value: Box::new(old_style),
+            new_value: Box::new(self.model.get_style_for_cell(sheet, row, column)?),
         });
         if temporary_unmerge {
             self.model.workbook.worksheet_mut(sheet)?.merged_cells = merged.clone();
@@ -977,19 +1065,25 @@ impl<'a> UserModel<'a> {
         Ok(())
     }
 
-    pub(super) fn array_old_values(
+    pub(super) fn capture_area_values(
         &self,
-        sheet: u32,
-        row: i32,
-        column: i32,
-        width: i32,
-        height: i32,
+        area: &Area,
+        spills: SpillCapture,
     ) -> Result<Vec<Vec<Option<Cell>>>, String> {
-        let ws = self.model.workbook.worksheet(sheet)?;
-        Ok((row..row + height)
+        let ws = self.model.workbook.worksheet(area.sheet)?;
+        Ok((area.row..area.row + area.height)
             .map(|r| {
-                (column..column + width)
-                    .map(|c| ws.cell(r, c).map(Cow::into_owned))
+                (area.column..area.column + area.width)
+                    .map(|c| {
+                        let cell = ws.cell(r, c).map(Cow::into_owned);
+                        if matches!(spills, SpillCapture::Omit)
+                            && matches!(cell, Some(Cell::SpillCell { .. }))
+                        {
+                            None
+                        } else {
+                            cell
+                        }
+                    })
                     .collect()
             })
             .collect())
@@ -1010,7 +1104,7 @@ impl<'a> UserModel<'a> {
             width,
             height,
         };
-        let old_value = self.array_old_values(sheet, row, column, width, height)?;
+        let old_value = self.capture_area_values(&area, SpillCapture::Preserve)?;
         diffs.extend(self.range_link_diffs(&area)?);
         self.model.range_clear_contents(&area)?;
         diffs.push(Diff::RangeClearContents {

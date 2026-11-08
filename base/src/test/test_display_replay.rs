@@ -428,7 +428,7 @@ fn panics_release_nested_user_and_raw_scopes_and_finalization_journals() {
                     })
                 });
             } else {
-                let mut scope = crate::display::DisplayEditGuard::new(&mut model, false);
+                let mut scope = crate::display::DisplayEditGuard::new(&mut model);
                 scope.target().model.start_display_journal();
                 scope.target().model._set("B1", "=2");
                 scope.target().model.evaluate();

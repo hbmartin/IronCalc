@@ -37,7 +37,7 @@ pub(crate) struct DisplayEditGuard<'s, 'a, T: DisplayEditTarget<'a>> {
     lifetime: std::marker::PhantomData<&'a ()>,
 }
 impl<'s, 'a, T: DisplayEditTarget<'a>> DisplayEditGuard<'s, 'a, T> {
-    pub(crate) fn new(target: &'s mut T, _replay: bool) -> Self {
+    pub(crate) fn new(target: &'s mut T) -> Self {
         let model = target.edit_model();
         let previous_depth = model.evaluation.display.edit_depth;
         model.begin_display_edit();
@@ -54,14 +54,16 @@ impl<'s, 'a, T: DisplayEditTarget<'a>> DisplayEditGuard<'s, 'a, T> {
         prepare: impl FnOnce(&mut T),
         publish: impl FnOnce(&mut T),
     ) -> Result<R, String> {
-        let mut scope = Self::new(target, false);
+        let mut scope = Self::new(target);
         let result = edit(scope.target());
         if result.is_ok() {
             prepare(scope.target());
             let calculate = scope.target().calculate_after_edit();
             scope.finish(calculate);
         } else {
-            scope.cancel();
+            // Live edits may have changed cells before returning an error.
+            // Reconcile their display without running formula calculation.
+            scope.finish(false);
         }
         publish(scope.target());
         scope.complete();
@@ -108,6 +110,10 @@ pub(crate) struct DisplayState {
     pub(crate) history_scans: usize,
     #[cfg(test)]
     pub(crate) paste_cells: usize,
+    #[cfg(test)]
+    pub(crate) cse_discovery_visits: usize,
+    #[cfg(test)]
+    pub(crate) paste_hook: Option<fn(&mut Model<'_>)>,
     #[cfg(test)]
     pub(crate) cf_hook: Option<fn()>,
 }
@@ -335,6 +341,21 @@ impl Model<'_> {
             records
                 .replay_links
                 .extend(delta.links.iter().map(|(p, _, _)| *p));
+        }
+    }
+
+    /// Re-entering a rewritten formula also destroys equal caches on redo.
+    pub(crate) fn retain_formula_replay(&self, area: &crate::expressions::types::Area) {
+        if let Some(journal) = &self.evaluation.display.journal {
+            let id = self.workbook.worksheets[area.sheet as usize].sheet_id;
+            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+            for row in area.row..area.row + area.height {
+                for column in area.column..area.column + area.width {
+                    let p = (id, row, column);
+                    records.replay_cells.insert(p);
+                    records.replay_links.insert(p);
+                }
+            }
         }
     }
 
@@ -1017,7 +1038,11 @@ impl DisplayDelta {
                 || [before, after].into_iter().flatten().any(|v| match v {
                     CachedCell::Formula(_, Some((_, (w, h)))) => {
                         conflicts.areas.iter().any(|&(s, r, c, ah, aw)| {
-                            s == p.0 && p.1 < r + ah && p.1 + h > r && p.2 < c + aw && p.2 + w > c
+                            s == p.0
+                                && p.1 < r.saturating_add(ah)
+                                && p.1.saturating_add(*h) > r
+                                && p.2 < c.saturating_add(aw)
+                                && p.2.saturating_add(*w) > c
                         })
                     }
                     CachedCell::Spill(Cell::SpillCell { a, .. }) => {
@@ -1026,5 +1051,33 @@ impl DisplayDelta {
                     _ => false,
                 })
         }) || self.links.iter().any(|(p, _, _)| conflicts.contains(*p))
+    }
+}
+
+#[cfg(test)]
+mod rectangle_tests {
+    use super::*;
+
+    #[test]
+    fn extreme_extents_intersect_and_prune_consistently() {
+        let mut delta = DisplayDelta {
+            cells: vec![(
+                (0, 3, 3),
+                None,
+                Some(CachedCell::Formula(
+                    FormulaValue::Number(1.0),
+                    Some((ArrayKind::Dynamic, (i32::MAX, i32::MAX))),
+                )),
+            )],
+            links: Vec::new(),
+        };
+        let mut conflicts = DisplayConflicts::default();
+        conflicts.areas.insert((0, 4, 4, i32::MAX, i32::MAX));
+        assert!(delta.intersects(&conflicts));
+        let mut other_sheet = DisplayConflicts::default();
+        other_sheet.areas.insert((1, 4, 4, i32::MAX, i32::MAX));
+        assert!(!delta.intersects(&other_sheet));
+        delta.discard_conflicts(&conflicts);
+        assert_eq!(delta.cell_count(), 0);
     }
 }

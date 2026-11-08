@@ -229,8 +229,8 @@ impl<'a> UserModel<'a> {
                 priority_a: before[a],
                 priority_b: before[b],
             }]);
+            self.model.evaluate_conditional_formatting();
         }
-        self.model.evaluate_conditional_formatting();
         Ok(())
     }
 }

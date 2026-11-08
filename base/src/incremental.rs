@@ -295,7 +295,8 @@ impl Model<'_> {
     }
 
     /// Recalculate after edits to cell values/formulas, supplying every edited
-    /// cell. Structural model APIs automatically invalidate the baseline.
+    /// cell. Scalar clears performed by the model are included automatically.
+    /// Structural model APIs automatically invalidate the baseline.
     /// Direct workbook mutations still require a full evaluation.
     /// `None` means the full evaluation path was selected. Inspect
     /// [`Model::evaluation_report`] to determine whether it completed successfully.
@@ -313,7 +314,8 @@ impl Model<'_> {
     ) -> Option<Vec<Key>> {
         let _clock = self.start_calculation_clock();
         if self.workbook.settings.iterative_calculation.enabled
-            || (!self.evaluation.report.converged && !self.evaluation.incremental_after_clear)
+            || (!self.evaluation.report.converged
+                && self.evaluation.pending_scalar_clears.is_none())
             || self.evaluation.scalar_only != Some(true)
             || self.evaluation.cells.is_empty()
             || !self.evaluation.circular.is_empty()
@@ -324,7 +326,13 @@ impl Model<'_> {
         if self.dependency_index.is_none() {
             self.build_dependency_index();
         }
-        self.evaluation.incremental_after_clear = false;
+        let mut all_edits = edited.to_vec();
+        if let Some(pending) = self.evaluation.pending_scalar_clears.take() {
+            all_edits.extend(pending);
+        }
+        all_edits.sort_unstable();
+        all_edits.dedup();
+        let edited = all_edits.as_slice();
         let mut index = Arc::clone(self.dependency_index.as_ref()?);
         let structure_changed =
             edited.iter().any(

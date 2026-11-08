@@ -2591,7 +2591,20 @@ impl<'a> Model<'a> {
         column: i32,
         value: String,
     ) -> Result<(), String> {
-        let result = self.set_user_input_retaining_other_links(sheet, row, column, value);
+        self.set_user_input_with_styles(sheet, row, column, value, &|model, cell| {
+            model.get_style_for_cell(cell.sheet, cell.row, cell.column)
+        })
+    }
+
+    pub(crate) fn set_user_input_with_styles(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        value: String,
+        styles: &crate::units::StyleResolver<'_>,
+    ) -> Result<(), String> {
+        let result = self.set_user_input_retaining_other_links(sheet, row, column, value, styles);
         if result.is_ok() {
             self.remove_dynamic_link(&(sheet, row, column));
         }
@@ -2604,6 +2617,7 @@ impl<'a> Model<'a> {
         row: i32,
         column: i32,
         value: String,
+        styles: &crate::units::StyleResolver<'_>,
     ) -> Result<(), String> {
         // first we make sure we can write in the cell and clear the spills.
         self.prepare_cell_for_user_input(sheet, row, column)?;
@@ -2639,7 +2653,9 @@ impl<'a> Model<'a> {
                 let cell = CellReferenceIndex { sheet, row, column };
                 let (parsed_formula, _static_result) =
                     &self.parsed_formulas[sheet as usize][formula_index as usize];
-                if let Some(units) = self.compute_node_units(parsed_formula, &cell) {
+                if let Some(units) =
+                    self.compute_node_units_with_styles(parsed_formula, &cell, styles)
+                {
                     let new_style_index = self
                         .workbook
                         .styles
@@ -2712,6 +2728,32 @@ impl<'a> Model<'a> {
         height: i32,
         value: &str,
     ) -> Result<(), String> {
+        self.set_user_array_formula_with_styles(
+            &Area {
+                sheet,
+                row,
+                column,
+                width,
+                height,
+            },
+            value,
+            &|model, cell| model.get_style_for_cell(cell.sheet, cell.row, cell.column),
+        )
+    }
+
+    pub(crate) fn set_user_array_formula_with_styles(
+        &mut self,
+        area: &Area,
+        value: &str,
+        styles: &crate::units::StyleResolver<'_>,
+    ) -> Result<(), String> {
+        let Area {
+            sheet,
+            row,
+            column,
+            width,
+            height,
+        } = *area;
         if self
             .workbook
             .worksheet(sheet)?
@@ -2777,7 +2819,9 @@ impl<'a> Model<'a> {
                 let (parsed_formula, _static_result) =
                     &self.parsed_formulas[sheet as usize][formula_index as usize];
 
-                if let Some(units) = self.compute_node_units(parsed_formula, &cell) {
+                if let Some(units) =
+                    self.compute_node_units_with_styles(parsed_formula, &cell, styles)
+                {
                     let new_style_index = self
                         .workbook
                         .styles
@@ -3302,10 +3346,24 @@ impl<'a> Model<'a> {
         });
         if !arrays
             && self.evaluation.scalar_only == Some(true)
-            && (self.evaluation.report.converged || self.evaluation.incremental_after_clear)
+            && (self.evaluation.report.converged || self.evaluation.pending_scalar_clears.is_some())
         {
-            self.evaluation.report = Default::default();
-            self.evaluation.incremental_after_clear = true;
+            let cleared: Vec<_> = (area.row..area.row + area.height)
+                .flat_map(|row| {
+                    ws.sheet_data
+                        .cells_in_row_between(row, area.column, area.column + area.width - 1)
+                        .filter(|(_, cell)| !matches!(&**cell, Cell::EmptyCell { .. }))
+                        .map(move |(column, _)| (area.sheet, row, column))
+                })
+                .collect();
+            let mut pending = self
+                .evaluation
+                .pending_scalar_clears
+                .take()
+                .unwrap_or_default();
+            pending.extend(cleared);
+            self.invalidate_report();
+            self.evaluation.pending_scalar_clears = Some(pending);
             self.evaluation.display.formatting_requested |= self.evaluation.display.edit_depth > 0;
         } else {
             self.invalidate_calculation();

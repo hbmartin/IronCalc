@@ -1640,6 +1640,8 @@ impl<'a> Model<'a> {
     }
 
     /// Adds a new CF rule to `sheet`, appended with priority = 1 + current max.
+    /// Rebuilds the stored-value formatting overlay without recalculating cells
+    /// or invalidating the calculation report. Nested edits refresh once on exit.
     /// Returns the assigned priority.
     pub fn add_conditional_formatting(
         &mut self,
@@ -1680,6 +1682,7 @@ impl<'a> Model<'a> {
             cf_rule: final_rule,
             priority,
         });
+        self.evaluation.display.formatting_requested = true;
         Ok(priority)
     }
 
@@ -1705,7 +1708,9 @@ impl<'a> Model<'a> {
                 "Conditional formatting index {index} out of bounds"
             ));
         }
-        Ok(ws.conditional_formatting.remove(index))
+        let removed = ws.conditional_formatting.remove(index);
+        self.evaluation.display.formatting_requested = true;
+        Ok(removed)
     }
 
     /// Replaces the range and rule of the CF entry at `index` on `sheet`.
@@ -1749,6 +1754,7 @@ impl<'a> Model<'a> {
         let old = ws.conditional_formatting[index].clone();
         ws.conditional_formatting[index].range = new_range.to_string();
         ws.conditional_formatting[index].cf_rule = final_rule;
+        self.evaluation.display.formatting_requested = true;
         Ok(old)
     }
 
@@ -1793,6 +1799,7 @@ impl<'a> Model<'a> {
             let other = ws.conditional_formatting[j].priority;
             ws.conditional_formatting[j].priority = current;
             ws.conditional_formatting[index].priority = other;
+            self.evaluation.display.formatting_requested = true;
         }
         Ok(())
     }
@@ -1838,6 +1845,7 @@ impl<'a> Model<'a> {
             let other = ws.conditional_formatting[j].priority;
             ws.conditional_formatting[j].priority = current;
             ws.conditional_formatting[index].priority = other;
+            self.evaluation.display.formatting_requested = true;
         }
         Ok(())
     }
