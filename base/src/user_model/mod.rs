@@ -30,3 +30,7 @@ mod display;
 #[cfg(test)]
 #[path = "../test/test_display_replay.rs"]
 mod display_replay_tests;
+
+#[cfg(test)]
+#[path = "../test/test_clipboard_replay.rs"]
+mod clipboard_replay_tests;

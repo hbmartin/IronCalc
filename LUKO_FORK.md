@@ -201,7 +201,10 @@ Iterations, genuine arrays, blocked spills, spill changes and unsuccessful
 baselines use full headless evaluation. Array eligibility is cached before
 index construction, avoiding repeated index builds during fallback. Removing
 arrays allows incremental evaluation again after the next full calculation.
-Pass every edited cell to incremental calls. Structural model APIs invalidate
+Scalar range clears remember populated positions and include them automatically
+in the next incremental call, even when its explicit edit list is empty. Repeated
+clears accumulate; cleared formulas participate in dependency-index rebuilding.
+Pass every other edited cell to incremental calls. Structural model APIs invalidate
 cached state automatically; direct mutations of public workbook internals still
 require explicit full evaluation.
 
@@ -309,11 +312,20 @@ Clipboard operations are prepared on isolated state containing only affected
 cells, complete touched spill groups, and required formula rewrites. Ordinary
 setters provide input and permission validation; preparation never evaluates
 formulas or reads the clock. Metadata needed to resolve formulas/styles is
-copied, but unrelated cell storage is not. Commit publishes the prepared cells,
+copied, but unrelated cell storage is not. Unit inference shares the ordinary
+setter implementation and reads affected styles from the stage, with untouched
+styles read from the full original model. Inferred styles are explicit diffs.
+Every observed cell or link write is checked against the prepared footprint
+before publication. Workbook-wide metadata copies and a broader read-through
+staging redesign remain deferred; preparation is not constant-cost in workbook
+metadata size. Commit publishes the prepared cells,
 metadata and existing diffs without repeating fallible input validation. Rejected
 preparation changes no live values, reports, caches, selection, history or queues.
 Translated merges determine which formulas survive; invalid translated merges
-continue to be skipped. Complete CSE cuts and dependent CSE rewrites retain their
+continue to be skipped. Destination contents are captured before clearing and
+sent as grouped clears before writes, preserving nonempty destinations through
+undo/redo and allowing peers to replace existing CSE groups. Complete CSE cuts
+and dependent CSE rewrites retain their
 array kind and extent through grouped clears and existing array diffs, including
 1x1 CSE formulas moved by merging. Partial CSE edits remain rejected. A moved
 dynamic merge anchor retains its value but starts with a 1x1 cached extent.
@@ -328,15 +340,26 @@ retire stale ownership, including reused sheet IDs. Ordinary encoded history
 still is not rebased. Missing remote runtime results are not synthesized.
 
 Scalar clears mark reports NotEvaluated and block forks while retaining an
-internal baseline eligible for incremental evaluation. Structural, spill/array,
+internal baseline and accumulated clear positions eligible for incremental
+evaluation. Report invalidation retires this baseline centrally. Structural, spill/array,
 settings/resource-limit and failed-calculation invalidation remain conservative.
 Neutral and no-op edits do not carry pending formatting effects into later edits;
 recovery from an earlier panic is the exception that repairs formatting.
+Raw Model conditional-formatting mutations rebuild overlays without formula
+calculation or report invalidation. Actual priority swaps refresh; boundary
+no-ops do not. Failed live edits reconcile links and pending formatting from
+stored results without calculating; partial mutations retain existing error
+semantics. Isolated failed clipboard preparation still changes no live state.
+Rewritten formulas and their array children/links retain equal cache supplements
+when replay would recreate them. Unrelated equal values remain filtered.
 
 Regional settings keep separate setter history and calculations. All selectable
 values are validated before the first setter. If an unexpected later setter
 fails, applied changes remain saved and redraw, while the drawer retains pending
 selections and displays a translated error. No combined settings API is added.
+Known rejections use exact canonical error strings; unexpected errors use the
+translated fallback. Formula-language IDs come from the engine generator JSON
+at build time, without bundling its formula translations or adding a binding API.
 Locale/timezone transition preflight rejects a whole incoming batch while paused
 or when enabled iteration settings are invalid at that transition; iteration
 setting changes alone remain allowed while paused. The Python retry example

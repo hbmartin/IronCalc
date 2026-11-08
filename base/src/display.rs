@@ -63,7 +63,10 @@ impl<'s, 'a, T: DisplayEditTarget<'a>> DisplayEditGuard<'s, 'a, T> {
         } else {
             // Live edits may have changed cells before returning an error.
             // Reconcile their display without running formula calculation.
-            scope.finish(false);
+            scope
+                .target()
+                .edit_model()
+                .finish_display_edit(false, false);
         }
         publish(scope.target());
         scope.complete();
@@ -73,7 +76,9 @@ impl<'s, 'a, T: DisplayEditTarget<'a>> DisplayEditGuard<'s, 'a, T> {
         self.target
     }
     pub(crate) fn finish(&mut self, calculate: bool) {
-        self.target.edit_model().finish_display_edit(calculate);
+        self.target
+            .edit_model()
+            .finish_display_edit(calculate, true);
     }
     pub(crate) fn cancel(&mut self) {
         self.target.edit_model().cancel_display_edit();
@@ -402,7 +407,7 @@ impl Model<'_> {
         }
     }
 
-    pub(crate) fn finish_display_edit(&mut self, calculate: bool) {
+    pub(crate) fn finish_display_edit(&mut self, calculate: bool, recover: bool) {
         self.evaluation.display.edit_depth -= 1;
         if self.evaluation.display.edit_depth != 0 {
             return;
@@ -438,7 +443,7 @@ impl Model<'_> {
         let formatting = std::mem::take(&mut self.evaluation.display.formatting_requested);
         if calculate && requested {
             self.evaluate();
-        } else if formatting || self.evaluation.display.formatting_recovery {
+        } else if formatting || (recover && self.evaluation.display.formatting_recovery) {
             self.evaluate_conditional_formatting();
         }
     }

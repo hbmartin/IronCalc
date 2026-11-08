@@ -203,3 +203,54 @@ test("settings errors have translated presentation in every bundled language", a
     }
   }
 });
+
+test.each([
+  ["Cannot change locale while evaluation is paused", "paused"],
+  ["Cannot change timezone while evaluation is paused", "paused"],
+  ["Cannot change calculation context while evaluation is paused", "paused"],
+  [
+    "Cannot change calculation context with invalid iterative calculation settings",
+    "invalid_iteration",
+  ],
+  ["unrelated paused request", "save_failed"],
+  ["unrelated invalid iterative calculation settings request", "save_failed"],
+  [
+    "Cannot change calculation context while evaluation is paused: unexpected detail",
+    "save_failed",
+  ],
+])("classifies only canonical engine rejections: %s", (message, code) => {
+  for (const asError of [false, true]) {
+    const model = newModel();
+    vi.spyOn(model, "setLocale").mockImplementation(() => {
+      throw asError ? new Error(message) : message;
+    });
+    const redraw = vi.fn();
+    const result = saveAndRedrawRegionalSettings(
+      model,
+      "fr",
+      "UTC",
+      "en",
+      redraw,
+    );
+    expect(result.error).toEqual({ code, detail: message });
+    expect(result.changed).toBe(false);
+    expect(redraw).not.toHaveBeenCalled();
+  }
+});
+
+test("build-time formula language IDs match the engine source and real WASM", async () => {
+  const source = JSON.parse(
+    await readFile(
+      new URL("../../../generate_language/src/languages.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  expect([...__IC_FORMULA_LANGUAGE_IDS__].sort()).toEqual(
+    Object.keys(source).sort(),
+  );
+  const model = newModel();
+  for (const language of __IC_FORMULA_LANGUAGE_IDS__) {
+    expect(saveRegionalSettings(model, "en", "UTC", language).error).toBeNull();
+    expect(model.getLanguage()).toBe(language);
+  }
+});
