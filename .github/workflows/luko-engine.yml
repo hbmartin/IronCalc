@@ -56,6 +56,11 @@ jobs:
           python-version: '3.12'
       - run: ./run_tests.sh
         working-directory: bindings/python
+      - name: Build Python documentation with warnings as errors
+        run: |
+          source bindings/python/venv/bin/activate
+          python -m pip install sphinx furo
+          bash scripts/check-python-docs.sh
 
   wasm:
     runs-on: ubuntu-latest

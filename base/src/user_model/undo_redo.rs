@@ -14,7 +14,6 @@ use crate::user_model::history::Diff;
 impl<'a> UserModel<'a> {
     pub(super) fn apply_undo_diff_list(&mut self, diff_list: &[Diff]) -> Result<(), String> {
         let mut needs_evaluation = false;
-        let mut needs_formatting = false;
         for diff in diff_list.iter().rev() {
             match diff {
                 Diff::SetCellValue {
@@ -24,6 +23,9 @@ impl<'a> UserModel<'a> {
                     new_value: _,
                     old_value,
                 } => {
+                    let _writes = self
+                        .model
+                        .observe_writes(crate::display::WriteIntent::Recreate);
                     needs_evaluation = true;
                     // If the current cell is a dynamic ArrayFormula anchor, its
                     // spill cells are not tracked in the diff (they are created
@@ -363,8 +365,7 @@ impl<'a> UserModel<'a> {
                     old_value,
                     new_value: _,
                 } => {
-                    self.model.workbook.theme = *old_value.clone();
-                    needs_formatting = true;
+                    self.model.set_theme(*old_value.clone());
                 }
                 Diff::CreateDefinedName {
                     name,
@@ -575,9 +576,8 @@ impl<'a> UserModel<'a> {
                         .iter()
                         .position(|cf| cf.priority == *priority)
                     {
-                        ws.conditional_formatting.remove(pos);
+                        self.model.delete_conditional_formatting(*sheet, pos)?;
                     }
-                    needs_formatting = true;
                 }
                 Diff::DeleteConditionalFormatting {
                     sheet,
@@ -595,7 +595,6 @@ impl<'a> UserModel<'a> {
                             priority: *old_priority,
                         },
                     )?;
-                    needs_formatting = true;
                 }
                 Diff::UpdateConditionalFormatting {
                     sheet,
@@ -605,16 +604,13 @@ impl<'a> UserModel<'a> {
                     old_priority,
                     ..
                 } => {
-                    let ws = self.model.workbook.worksheet_mut(*sheet)?;
-                    let i = *index as usize;
-                    if i < ws.conditional_formatting.len() {
-                        ws.conditional_formatting[i] = ConditionalFormatting {
-                            range: old_range.clone(),
-                            cf_rule: *old_rule.clone(),
-                            priority: *old_priority,
-                        };
-                    }
-                    needs_formatting = true;
+                    self.model.replace_conditional_formatting_at(
+                        *sheet,
+                        *index as usize,
+                        old_range,
+                        old_rule,
+                        Some(*old_priority),
+                    )?;
                 }
                 Diff::SwapConditionalFormattingPriority {
                     sheet,
@@ -623,15 +619,13 @@ impl<'a> UserModel<'a> {
                     priority_a,
                     priority_b,
                 } => {
-                    // Undo: restore each rule's original priority.
-                    let ws = self.model.workbook.worksheet_mut(*sheet)?;
-                    if let Some(cf) = ws.conditional_formatting.get_mut(*index_a as usize) {
-                        cf.priority = *priority_a;
-                    }
-                    if let Some(cf) = ws.conditional_formatting.get_mut(*index_b as usize) {
-                        cf.priority = *priority_b;
-                    }
-                    needs_formatting = true;
+                    self.model.restore_conditional_formatting_priorities(
+                        *sheet,
+                        &[
+                            (*index_a as usize, *priority_a),
+                            (*index_b as usize, *priority_b),
+                        ],
+                    )?;
                 }
                 Diff::SetCellLink {
                     sheet,
@@ -651,13 +645,10 @@ impl<'a> UserModel<'a> {
                     new_value: _,
                 } => {
                     // Merged cells block spilling, so a change can affect results
-                    needs_evaluation = true;
-                    self.model.workbook.worksheet_mut(*sheet)?.merged_cells = old_value.clone();
+                    needs_evaluation |=
+                        self.model.replace_merged_cells(*sheet, old_value.clone())?;
                 }
             }
-        }
-        if needs_formatting {
-            self.model.evaluate_conditional_formatting();
         }
         if needs_evaluation {
             // A batch may move cells using several value diffs. The caller
@@ -671,7 +662,6 @@ impl<'a> UserModel<'a> {
     /// Applies diff list
     pub(super) fn apply_diff_list(&mut self, diff_list: &[Diff]) -> Result<(), String> {
         let mut needs_evaluation = false;
-        let mut needs_formatting = false;
         for diff in diff_list {
             match diff {
                 Diff::SetCellValue {
@@ -899,8 +889,7 @@ impl<'a> UserModel<'a> {
                     old_value: _,
                     new_value,
                 } => {
-                    self.model.workbook.theme = *new_value.clone();
-                    needs_formatting = true;
+                    self.model.set_theme(*new_value.clone());
                 }
                 Diff::CreateDefinedName { name, scope, value } => {
                     self.model.new_defined_name(name, *scope, value)?
@@ -1064,12 +1053,10 @@ impl<'a> UserModel<'a> {
                             priority: *priority,
                         },
                     )?;
-                    needs_formatting = true;
                 }
                 Diff::DeleteConditionalFormatting { sheet, index, .. } => {
                     self.model
                         .delete_conditional_formatting(*sheet, *index as usize)?;
-                    needs_formatting = true;
                 }
                 Diff::UpdateConditionalFormatting {
                     sheet,
@@ -1078,13 +1065,13 @@ impl<'a> UserModel<'a> {
                     new_rule,
                     ..
                 } => {
-                    let ws = self.model.workbook.worksheet_mut(*sheet)?;
-                    let i = *index as usize;
-                    if i < ws.conditional_formatting.len() {
-                        ws.conditional_formatting[i].range = new_range.clone();
-                        ws.conditional_formatting[i].cf_rule = *new_rule.clone();
-                    }
-                    needs_formatting = true;
+                    self.model.replace_conditional_formatting_at(
+                        *sheet,
+                        *index as usize,
+                        new_range,
+                        new_rule,
+                        None,
+                    )?;
                 }
                 Diff::SwapConditionalFormattingPriority {
                     sheet,
@@ -1093,15 +1080,13 @@ impl<'a> UserModel<'a> {
                     priority_a,
                     priority_b,
                 } => {
-                    // Apply/redo: swap the two priorities.
-                    let ws = self.model.workbook.worksheet_mut(*sheet)?;
-                    if let Some(cf) = ws.conditional_formatting.get_mut(*index_a as usize) {
-                        cf.priority = *priority_b;
-                    }
-                    if let Some(cf) = ws.conditional_formatting.get_mut(*index_b as usize) {
-                        cf.priority = *priority_a;
-                    }
-                    needs_formatting = true;
+                    self.model.restore_conditional_formatting_priorities(
+                        *sheet,
+                        &[
+                            (*index_a as usize, *priority_b),
+                            (*index_b as usize, *priority_a),
+                        ],
+                    )?;
                 }
                 Diff::SetCellLink {
                     sheet,
@@ -1121,15 +1106,12 @@ impl<'a> UserModel<'a> {
                     new_value,
                 } => {
                     // Merged cells block spilling, so a change can affect results
-                    needs_evaluation = true;
-                    self.model.workbook.worksheet_mut(*sheet)?.merged_cells = new_value.clone();
+                    needs_evaluation |=
+                        self.model.replace_merged_cells(*sheet, new_value.clone())?;
                 }
             }
         }
 
-        if needs_formatting {
-            self.model.evaluate_conditional_formatting();
-        }
         if needs_evaluation {
             self.model.invalidate_calculation();
             self.evaluate_if_not_paused();

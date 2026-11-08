@@ -75,11 +75,6 @@ impl SheetData {
         CELL_VISITS.with(std::cell::Cell::get)
     }
 
-    pub(crate) fn formula_writes(&self) -> crate::display::WriteIntentGuard {
-        self.observer
-            .write_scope(crate::display::WriteIntent::Recreate)
-    }
-
     pub(crate) fn style_writes(&self) -> crate::display::WriteIntentGuard {
         self.observer
             .write_scope(crate::display::WriteIntent::Style)
@@ -91,14 +86,14 @@ impl SheetData {
     pub(crate) fn observe_removal(&self) {
         if self.observer.active() {
             for (r, c, cell) in self.cells() {
-                self.observer.capture(r, c, Some(&cell));
+                self.observer.capture(r, c, Some(&cell), self);
             }
         }
     }
     fn capture(&self, row: i32, column: i32) {
         if self.observer.active() {
             self.observer
-                .capture(row, column, self.cell(row, column).as_deref());
+                .capture(row, column, self.cell(row, column).as_deref(), self);
         }
     }
 
@@ -165,7 +160,7 @@ impl SheetData {
     pub fn set_cell(&mut self, row: i32, column: i32, cell: Cell) -> Option<Cell> {
         if self.observer.active() {
             self.observer
-                .replacement(row, column, self.cell(row, column).as_deref(), &cell);
+                .replacement(row, column, self.cell(row, column).as_deref(), &cell, self);
         }
         self.row_or_insert(row)?.insert(column, cell)
     }
@@ -174,7 +169,7 @@ impl SheetData {
     pub fn remove_cell(&mut self, row: i32, column: i32) -> Option<Cell> {
         if self.observer.active() {
             self.observer
-                .removal(row, column, self.cell(row, column).as_deref());
+                .removal(row, column, self.cell(row, column).as_deref(), self);
         }
         let row_data = self.row_mut(row)?;
         let cell = row_data.remove(column)?;
@@ -270,7 +265,7 @@ impl SheetData {
     pub fn remove_row(&mut self, row: i32) {
         if self.observer.active() {
             for (c, cell) in self.cells_in_row(row) {
-                self.observer.removal(row, c, Some(&cell));
+                self.observer.removal(row, c, Some(&cell), self);
             }
         }
         let Some((chunk_index, index)) = locate(row) else {
@@ -317,14 +312,12 @@ impl SheetData {
                     .binary_search_by_key(&c, |(column, _)| *column)
                     .is_err()
                 {
-                    self.observer.removal(row, c, Some(&cell));
-                } else {
-                    self.observer.capture(row, c, Some(&cell));
+                    self.observer.removal(row, c, Some(&cell), self);
                 }
             }
             for (c, cell) in &cells {
                 self.observer
-                    .replacement(row, *c, self.cell(row, *c).as_deref(), cell);
+                    .replacement(row, *c, self.cell(row, *c).as_deref(), cell, self);
             }
         }
         let Some(row_data) = self.row_or_insert(row) else {

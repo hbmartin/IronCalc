@@ -423,8 +423,11 @@ fn group_capture_is_deduplicated_and_unrelated_equal_caches_stay_sparse() {
     raw.evaluate();
     let mut m = UserModel::from_model(raw);
     m.with_user_display_edit(true, |m| {
-        m.model.retain_spill_ownership(0, 2, 2);
-        m.model.retain_spill_ownership(0, 2, 2);
+        let _writes = m
+            .model
+            .observe_writes(crate::display::WriteIntent::SpillShape);
+        let _ = m.model.workbook.worksheets[0].sheet_data.cell_mut(2, 2);
+        let _ = m.model.workbook.worksheets[0].sheet_data.cell_mut(2, 2);
         m.range_clear_contents(&area(2, 3, 1, 1))
     })
     .unwrap();
@@ -494,6 +497,344 @@ fn failed_batches_invalidate_after_applied_writes_even_when_content_is_restored(
             );
             assert_eq!(clock_reads(), reads);
             assert!(raw.fork_evaluation_session().is_err());
+        }
+    });
+}
+
+#[test]
+fn failed_merge_metadata_replay_invalidates_without_cell_writes() {
+    use crate::types::MergedCell;
+    with_advancing_time(1_700_000_000_000, 1000, || {
+        for paused in [false, true] {
+            for mode in 0..3 {
+                for changed in [false, true] {
+                    let mut m = link_model();
+                    m.model.evaluate_incremental(&[]);
+                    assert!(m.model.dependency_index.is_some());
+                    if paused {
+                        m.pause_evaluation();
+                    }
+                    let report = m.model.evaluation_report().clone();
+                    let dependency = m.model.dependency_index.clone().unwrap();
+                    let calculations = m.model.evaluation.full_evaluations;
+                    let formats = m.model.evaluation.cf_evaluations;
+                    let reads = clock_reads();
+                    let merges = if changed {
+                        vec![MergedCell {
+                            row: 5,
+                            column: 4,
+                            width: 2,
+                            height: 1,
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    let result = match mode {
+                        0 => {
+                            m.push_diff_list(vec![
+                                cell_diff(999, "1"),
+                                Diff::SetMergedCells {
+                                    sheet: 0,
+                                    old_value: merges.clone(),
+                                    new_value: vec![],
+                                },
+                            ]);
+                            m.flush_send_queue();
+                            m.undo()
+                        }
+                        1 => {
+                            m.push_diff_list(vec![
+                                Diff::SetMergedCells {
+                                    sheet: 0,
+                                    old_value: vec![],
+                                    new_value: merges.clone(),
+                                },
+                                cell_diff(999, "1"),
+                            ]);
+                            let entry = m.history.undo_stack.pop().unwrap();
+                            m.history.redo_stack.push(entry);
+                            m.flush_send_queue();
+                            m.redo()
+                        }
+                        _ => m.apply_external_diffs(&bitcode::encode(&vec![QueueDiffs {
+                            r#type: DiffType::Redo,
+                            list: vec![
+                                Diff::SetMergedCells {
+                                    sheet: 0,
+                                    old_value: vec![],
+                                    new_value: merges.clone(),
+                                },
+                                cell_diff(999, "1"),
+                            ],
+                        }])),
+                    };
+                    assert!(result.is_err());
+                    assert_eq!(m.model.workbook.worksheets[0].merged_cells, merges);
+                    if changed {
+                        assert_eq!(
+                            m.model.evaluation_report().failure,
+                            Some(CalculationFailure::NotEvaluated)
+                        );
+                        assert!(m.model.dependency_index.is_none());
+                        assert!(m.model.fork_evaluation_session().is_err());
+                    } else {
+                        assert_eq!(m.model.evaluation_report(), &report);
+                        assert!(std::sync::Arc::ptr_eq(
+                            &dependency,
+                            m.model.dependency_index.as_ref().unwrap()
+                        ));
+                    }
+                    assert_eq!(
+                        m.model.evaluation.cf_evaluations,
+                        formats + usize::from(changed)
+                    );
+                    assert_eq!(m.model.evaluation.full_evaluations, calculations);
+                    assert_eq!(clock_reads(), reads);
+                    assert_eq!(value(&m, 1, 2), "10");
+                    assert_eq!(m.model.links.len(), 1);
+                    assert!(
+                        m.model
+                            .get_extended_style_for_cell(0, 1, 2)
+                            .unwrap()
+                            .style
+                            .font
+                            .b
+                    );
+                    assert!(bitcode::decode::<Vec<QueueDiffs>>(&m.flush_send_queue())
+                        .unwrap()
+                        .is_empty());
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn unrecorded_final_calculation_has_no_storage_observation() {
+    use crate::display::calculation_observer_visits;
+    let mut raw = new_empty_model();
+    raw._set("A1", "1");
+    raw._set("B1", "=SEQUENCE(2,2)+A1");
+    raw._set("F1", "=HYPERLINK(\"https://example.com\",A1)");
+    raw.evaluate();
+    let mut m = UserModel::from_model(raw);
+    let initial = calculation_observer_visits();
+    m.set_user_input(0, 1, 1, "2").unwrap();
+    assert!(calculation_observer_visits() > initial); // recorded history needs results
+    for operation in 0..4 {
+        let before = calculation_observer_visits();
+        match operation {
+            0 => m.undo().unwrap(),
+            1 => m.redo().unwrap(),
+            2 => m
+                .apply_external_diffs(&bitcode::encode(&vec![QueueDiffs {
+                    r#type: DiffType::Redo,
+                    list: vec![cell_diff(0, "3")],
+                }]))
+                .unwrap(),
+            _ => m
+                .model
+                .with_display_batch(|raw| {
+                    raw.set_user_input(0, 1, 1, "4".into())?;
+                    raw.evaluate();
+                    Ok(())
+                })
+                .unwrap(),
+        }
+        assert_eq!(
+            calculation_observer_visits(),
+            before,
+            "operation={operation}"
+        );
+    }
+}
+
+#[test]
+fn activity_only_spill_edits_skip_history_group_expansion() {
+    let mut raw = new_empty_model();
+    raw._set("B2", "=SEQUENCE(20,20)");
+    raw.evaluate();
+    let before = raw.evaluation.display.ownership_groups;
+    raw.with_display_batch(|raw| {
+        raw.range_clear_contents(&area(2, 3, 1, 1))?;
+        assert_eq!(raw.active_ownership_groups(), 0);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(raw.evaluation.display.ownership_groups, before);
+    assert!(raw.evaluation.display.journal_positions == 0);
+    assert!(raw.fork_evaluation_session().is_err());
+}
+
+#[test]
+fn sheet_lookup_builds_are_bounded_per_replay_not_per_cell() {
+    let mut raw = new_empty_model();
+    for row in 1..=200 {
+        raw.set_user_input(0, row, 1, "=ROW()".into()).unwrap();
+    }
+    raw.evaluate();
+    let mut m = UserModel::from_model(raw);
+    m.insert_rows(0, 1, 1).unwrap();
+    m.pause_evaluation();
+    for undo in [true, false] {
+        let before = m.model.evaluation.display.sheet_lookup_builds.get();
+        if undo {
+            m.undo().unwrap();
+        } else {
+            m.redo().unwrap();
+        }
+        assert!(m.model.evaluation.display.sheet_lookup_builds.get() - before <= 4);
+        assert_eq!(
+            value(&m, if undo { 1 } else { 2 }, 1),
+            if undo { "1" } else { "2" }
+        );
+    }
+}
+
+#[test]
+fn dependency_expansion_keeps_foreign_children_during_paused_structural_replay() {
+    let mut raw = new_empty_model();
+    raw._set("Z1", "1");
+    raw._set("D1", "=SEQUENCE(2,2)");
+    raw._set("A2", "=SEQUENCE(1,$Z$1)");
+    raw.evaluate();
+    let mut m = UserModel::from_model(raw);
+    m.insert_rows(0, 2, 1).unwrap();
+    let mut peer = UserModel::from_model(Model::from_bytes(&m.to_bytes(), "en").unwrap());
+    peer.set_user_input(0, 1, 26, "5").unwrap();
+    m.apply_external_diffs(&peer.flush_send_queue()).unwrap();
+    assert_eq!(value(&m, 3, 5), "5");
+    m.pause_evaluation();
+    for _ in 0..3 {
+        m.undo().unwrap();
+        for col in 1..=5 {
+            assert_eq!(value(&m, 2, col), col.to_string());
+        }
+        assert_spill_owners(&m);
+        m.redo().unwrap();
+        for col in 1..=5 {
+            assert_eq!(value(&m, 3, col), col.to_string());
+        }
+        assert_spill_owners(&m);
+        let saved: Workbook = bitcode::decode(&m.to_bytes()).unwrap();
+        assert!(matches!(
+            saved.worksheets[0].cell(3, 5).as_deref(),
+            Some(Cell::SpillCell { a: (3, 1), .. })
+        ));
+    }
+}
+
+#[test]
+fn identity_cse_reference_rewrites_do_not_recreate_formula_ownership() {
+    let mut raw = new_empty_model();
+    raw._set("B100", "1");
+    for row in 1..=50 {
+        raw.set_user_array_formula(0, row, 1, 1, 1, "=B100")
+            .unwrap();
+    }
+    raw.evaluate();
+    let mut m = UserModel::from_model(raw);
+    m.insert_rows(0, 100, 1).unwrap();
+    assert_eq!(m.history.undo_stack.last().unwrap().display.cell_count(), 0);
+    assert!(matches!(
+        m.model.workbook.worksheets[0].cell(1, 1).as_deref(),
+        Some(Cell::ArrayFormula {
+            kind: crate::types::ArrayKind::Cse,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn failed_metadata_replay_keeps_applied_rule_and_theme_overlays_current() {
+    with_advancing_time(1_700_000_000_000, 1000, || {
+        for paused in [false, true] {
+            for undo in [false, true] {
+                for operation in 0..5 {
+                    let mut m = link_model();
+                    let before_rules = m.model.workbook.worksheets[0]
+                        .conditional_formatting
+                        .clone();
+                    let before_theme = m.get_theme();
+                    let styles = |m: &UserModel| {
+                        (1..=2)
+                            .flat_map(|r| {
+                                (1..=2).map(move |c| {
+                                    m.model.get_extended_style_for_cell(0, r, c).unwrap().style
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let before_styles = styles(&m);
+                    let entries = m.history.undo_stack.len();
+                    match operation {
+                        0 => {
+                            m.add_conditional_formatting(0, "A2", rule("TRUE")).unwrap();
+                        }
+                        1 => m.delete_conditional_formatting(0, 0).unwrap(),
+                        2 => m
+                            .update_conditional_formatting(0, 0, "A1", rule("FALSE"))
+                            .unwrap(),
+                        3 => m.raise_conditional_formatting_priority(0, 0).unwrap(),
+                        _ => {
+                            let mut theme = m.get_theme();
+                            theme.accent1 = "#123456".into();
+                            m.set_theme(theme);
+                        }
+                    }
+                    assert_eq!(
+                        m.history.undo_stack.len(),
+                        entries + 1,
+                        "operation={operation}"
+                    );
+                    let after_rules = m.model.workbook.worksheets[0]
+                        .conditional_formatting
+                        .clone();
+                    let after_theme = m.get_theme();
+                    let after_styles = styles(&m);
+                    if undo {
+                        m.history
+                            .undo_stack
+                            .last_mut()
+                            .unwrap()
+                            .diffs
+                            .insert(0, cell_diff(999, "1"));
+                    } else {
+                        m.undo().unwrap();
+                        m.history
+                            .redo_stack
+                            .last_mut()
+                            .unwrap()
+                            .diffs
+                            .push(cell_diff(999, "1"));
+                    }
+                    m.flush_send_queue();
+                    m.model.evaluate_incremental(&[]);
+                    if paused {
+                        m.pause_evaluation();
+                    }
+                    let report = m.model.evaluation_report().clone();
+                    let dependency = m.model.dependency_index.clone().unwrap();
+                    let calculations = m.model.evaluation.full_evaluations;
+                    let formats = m.model.evaluation.cf_evaluations;
+                    let reads = clock_reads();
+                    assert!((if undo { m.undo() } else { m.redo() }).is_err());
+                    assert_eq!(
+                        m.model.workbook.worksheets[0].conditional_formatting,
+                        if undo { before_rules } else { after_rules }
+                    );
+                    assert_eq!(m.get_theme(), if undo { before_theme } else { after_theme });
+                    assert_eq!(styles(&m), if undo { before_styles } else { after_styles });
+                    assert_eq!(m.model.evaluation_report(), &report);
+                    assert!(std::sync::Arc::ptr_eq(
+                        &dependency,
+                        m.model.dependency_index.as_ref().unwrap()
+                    ));
+                    assert_eq!(m.model.evaluation.full_evaluations, calculations);
+                    assert_eq!(m.model.evaluation.cf_evaluations, formats + 1);
+                    assert_eq!(clock_reads(), reads);
+                }
+            }
         }
     });
 }
