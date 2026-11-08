@@ -1851,6 +1851,49 @@ impl<'a> Model<'a> {
         Ok(())
     }
 
+    pub(crate) fn replace_conditional_formatting_at(
+        &mut self,
+        sheet: u32,
+        index: usize,
+        range: &str,
+        rule: &CfRule,
+        priority: Option<u32>,
+    ) -> Result<(), String> {
+        let ws = self.workbook.worksheet_mut(sheet)?;
+        let Some(old) = ws.conditional_formatting.get_mut(index) else {
+            return Ok(());
+        };
+        let replacement = crate::cf_types::ConditionalFormatting {
+            range: range.into(),
+            cf_rule: rule.clone(),
+            priority: priority.unwrap_or(old.priority),
+        };
+        if *old != replacement {
+            *old = replacement;
+            self.evaluate_conditional_formatting();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_conditional_formatting_priorities(
+        &mut self,
+        sheet: u32,
+        priorities: &[(usize, u32)],
+    ) -> Result<(), String> {
+        let ws = self.workbook.worksheet_mut(sheet)?;
+        let mut changed = false;
+        for &(index, priority) in priorities {
+            if let Some(rule) = ws.conditional_formatting.get_mut(index) {
+                changed |= rule.priority != priority;
+                rule.priority = priority;
+            }
+        }
+        if changed {
+            self.evaluate_conditional_formatting();
+        }
+        Ok(())
+    }
+
     /// Inserts a CF entry at `index` without modifying priority (used for undo/redo).
     pub(crate) fn insert_conditional_formatting_at(
         &mut self,
@@ -1865,6 +1908,7 @@ impl<'a> Model<'a> {
             ));
         }
         ws.conditional_formatting.insert(index, cf);
+        self.evaluate_conditional_formatting();
         Ok(())
     }
 }

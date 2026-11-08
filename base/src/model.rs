@@ -2439,6 +2439,17 @@ impl<'a> Model<'a> {
         column: i32,
         formula: String,
     ) -> Result<(), String> {
+        let _writes = self.observe_writes(crate::display::WriteIntent::Recreate);
+        self.rewrite_cell_formula(sheet, row, column, formula)
+    }
+
+    pub(crate) fn rewrite_cell_formula(
+        &mut self,
+        sheet: u32,
+        row: i32,
+        column: i32,
+        formula: String,
+    ) -> Result<(), String> {
         let result = (|| {
             let mut style_index = self.get_cell_style_index(sheet, row, column)?;
             if self.workbook.styles.style_is_quote_prefix(style_index) {
@@ -2492,7 +2503,6 @@ impl<'a> Model<'a> {
                 }
             }
             CellStructure::DynamicFormula { range } => {
-                self.retain_spill_ownership(sheet, row, column);
                 // clear the spill of the dynamic formula
                 let (width, height) = range;
                 let ws = self.workbook.worksheet_mut(sheet)?;
@@ -2511,7 +2521,6 @@ impl<'a> Model<'a> {
                 // We can write in it but we need to clear the spill and reset the anchor
                 // while retaining its cached value until the next calculation.
                 let (anchor_row, anchor_column) = anchor;
-                self.retain_spill_ownership(sheet, anchor_row, anchor_column);
                 let (width, height) = range;
                 let ws = self.workbook.worksheet_mut(sheet)?;
                 // Extract formula index and style from the anchor before mutating
@@ -2751,6 +2760,7 @@ impl<'a> Model<'a> {
         value: &str,
         styles: &crate::units::StyleResolver<'_>,
     ) -> Result<(), String> {
+        let _writes = self.observe_writes(crate::display::WriteIntent::Recreate);
         let Area {
             sheet,
             row,

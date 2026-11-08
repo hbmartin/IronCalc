@@ -240,7 +240,6 @@ impl Worksheet {
         index: i32,
         style: i32,
     ) -> Result<(), String> {
-        let _writes = self.sheet_data.formula_writes();
         let cell = Cell::new_formula(index, style);
         self.update_cell(row, column, cell)
     }
@@ -254,7 +253,6 @@ impl Worksheet {
         width: i32,
         height: i32,
     ) -> Result<(), String> {
-        let _writes = self.sheet_data.formula_writes();
         let cell = Cell::ArrayFormula {
             f: index,
             s: style,
@@ -274,7 +272,6 @@ impl Worksheet {
         width: i32,
         height: i32,
     ) -> Result<(), String> {
-        let _writes = self.sheet_data.formula_writes();
         let cell = Cell::ArrayFormula {
             f: index,
             s: style,
