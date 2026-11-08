@@ -313,6 +313,7 @@ impl Model<'_> {
         edited: &[(u32, i32, i32)],
     ) -> Option<Vec<Key>> {
         let _clock = self.start_calculation_clock();
+        let _writes = self.observe_calculation_writes();
         if self.workbook.settings.iterative_calculation.enabled
             || (!self.evaluation.report.converged
                 && self.evaluation.pending_scalar_clears.is_none())

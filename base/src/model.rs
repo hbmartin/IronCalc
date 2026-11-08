@@ -2867,7 +2867,7 @@ impl<'a> Model<'a> {
         // just use set user input on every cell
         for r in row..row + height {
             for c in column..column + width {
-                self.set_user_input(sheet, r, c, value.to_string())?;
+                self.set_user_input_with_styles(sheet, r, c, value.to_string(), styles)?;
             }
         }
 

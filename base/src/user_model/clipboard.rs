@@ -756,17 +756,6 @@ impl<'a> UserModel<'a> {
                     .worksheet(ext_sheet)?
                     .cell(ext_row, ext_col)
                     .map(Cow::into_owned);
-                let (width, height) = match &old_cell {
-                    Some(Cell::ArrayFormula { r, .. }) => *r,
-                    _ => (1, 1),
-                };
-                self.model.retain_formula_replay(&Area {
-                    sheet: ext_sheet,
-                    row: ext_row,
-                    column: ext_col,
-                    width,
-                    height,
-                });
                 if let Some(Cell::ArrayFormula {
                     kind: ArrayKind::Cse,
                     r: (w, h),
