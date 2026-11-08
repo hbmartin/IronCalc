@@ -1739,6 +1739,12 @@ impl<'a> Model<'a> {
                 "Invalid conditional formatting range: '{new_range}'"
             ));
         }
+        let ws = self.workbook.worksheet(sheet)?;
+        if index >= ws.conditional_formatting.len() {
+            return Err(format!(
+                "Conditional formatting index {index} out of bounds"
+            ));
+        }
         // Formulas are stored internally in English regardless of the user's
         // active language. Translate before materializing the rule so an invalid
         // formula fails without creating an orphan dxf.
@@ -1746,11 +1752,6 @@ impl<'a> Model<'a> {
         self.cf_rule_input_to_internal(&mut new_rule, sheet)?;
         let final_rule = self.cf_rule_from_input(new_rule);
         let ws = self.workbook.worksheet_mut(sheet)?;
-        if index >= ws.conditional_formatting.len() {
-            return Err(format!(
-                "Conditional formatting index {index} out of bounds"
-            ));
-        }
         let old = ws.conditional_formatting[index].clone();
         ws.conditional_formatting[index].range = new_range.to_string();
         ws.conditional_formatting[index].cf_rule = final_rule;

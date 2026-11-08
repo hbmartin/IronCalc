@@ -5,6 +5,15 @@ The user API (:class:`UserModel`) is the high level API used by the IronCalc
 web application. Every action evaluates the workbook, keeps undo/redo history
 and produces diffs for collaboration.
 
+Local undo/redo also retains runtime formula results, spill ownership, and dynamic
+links for paused replay. Formula replacement, including re-entering identical
+formula text, preserves the completed result in this local history; these display
+supplements are not serialized or exchanged with collaborators. A failed live
+edit may retain partial mutations and old dependent results, with a calculation
+report of ``NotEvaluated``. Formatting reflects those displayed results until
+explicit calculation. Rejected no-op edits do not calculate or refresh formatting.
+
+
 Conventions:
 
 * ``sheet`` indexes are 0-based; ``row`` and ``column`` indexes are 1-based

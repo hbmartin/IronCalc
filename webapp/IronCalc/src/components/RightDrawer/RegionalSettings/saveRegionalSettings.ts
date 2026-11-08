@@ -1,5 +1,6 @@
 import type { Model } from "@ironcalc/wasm";
 import { getAllTimezones, getSupportedLocales } from "@ironcalc/wasm";
+import { formulaLanguageIds } from "../../../generated/formulaLanguageIds.ts";
 
 export type RegionalSettingsError = {
   code:
@@ -16,7 +17,7 @@ export type RegionalSettingsSaveResult = {
   error: RegionalSettingsError | null;
   changed: boolean;
 };
-const formulaLanguages = new Set(__IC_FORMULA_LANGUAGE_IDS__);
+const formulaLanguages = new Set(formulaLanguageIds);
 
 // Rust/binding APIs still return strings. Match the complete canonical errors;
 // unrelated errors containing these words must use the unexpected-failure path.

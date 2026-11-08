@@ -153,7 +153,10 @@ impl SheetData {
 
     /// Puts a cell at a position and returns the one that was there.
     pub fn set_cell(&mut self, row: i32, column: i32, cell: Cell) -> Option<Cell> {
-        self.capture(row, column);
+        if self.observer.active() {
+            self.observer
+                .replacement(row, column, self.cell(row, column).as_deref(), &cell);
+        }
         self.row_or_insert(row)?.insert(column, cell)
     }
 
@@ -299,8 +302,9 @@ impl SheetData {
             for (c, cell) in self.cells_in_row(row) {
                 self.observer.capture(row, c, Some(&cell));
             }
-            for (c, _) in &cells {
-                self.capture(row, *c);
+            for (c, cell) in &cells {
+                self.observer
+                    .replacement(row, *c, self.cell(row, *c).as_deref(), cell);
             }
         }
         let Some(row_data) = self.row_or_insert(row) else {

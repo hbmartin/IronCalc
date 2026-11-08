@@ -108,6 +108,12 @@ pub(crate) struct DisplayState {
     #[cfg(test)]
     pub(crate) journal_positions: usize,
     #[cfg(test)]
+    pub(crate) link_cleanup_visits: usize,
+    #[cfg(test)]
+    pub(crate) incremental_edit_allocations: usize,
+    #[cfg(test)]
+    pub(crate) clear_scan_visits: usize,
+    #[cfg(test)]
     pub(crate) spill_owner_visits: usize,
     #[cfg(test)]
     pub(crate) conflict_batches: usize,
@@ -143,6 +149,8 @@ pub(crate) struct MutationJournal {
     links: HashMap<Position, Option<Link>>,
     replay_cells: HashSet<Position>,
     replay_links: HashSet<Position>,
+    formulas: HashMap<Position, Option<(i32, Option<ArrayKind>)>>,
+    calculation_depth: usize,
 }
 
 /// Cloning worksheet data never carries observation into the clone.
@@ -165,9 +173,76 @@ impl MutationObserver {
             let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
             let position = (self.sheet_id, row, column);
             records
+                .formulas
+                .entry(position)
+                .or_insert_with(|| formula_identity(cell));
+            records
                 .cells
                 .entry(position)
                 .or_insert_with(|| cell.and_then(CachedCell::of));
+        }
+    }
+    pub(crate) fn replacement(&self, row: i32, column: i32, old: Option<&Cell>, new: &Cell) {
+        self.capture(row, column, old);
+        let Some(journal) = &self.journal else {
+            return;
+        };
+        let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
+        if records.calculation_depth != 0 {
+            return;
+        }
+        let formula = match new {
+            Cell::CellFormula { v, .. } | Cell::ArrayFormula { v, .. } => {
+                matches!(v, FormulaValue::Unevaluated)
+                    || formula_identity(old) != formula_identity(Some(new))
+            }
+            _ => false,
+        };
+        if !formula {
+            return;
+        }
+        let position = (self.sheet_id, row, column);
+        // Include the original group even when preparation already collapsed it.
+        let mut extents = vec![(1, 1)];
+        if let Some(Some(CachedCell::Formula(_, Some((_, extent))))) = records.cells.get(&position)
+        {
+            extents.push(*extent);
+        }
+        for cell in old.into_iter().chain(std::iter::once(new)) {
+            if let Cell::ArrayFormula { r, .. } = cell {
+                extents.push(*r);
+            }
+        }
+        extents.sort_unstable();
+        extents.dedup();
+        for (width, height) in extents {
+            for r in row..row.saturating_add(height) {
+                for c in column..column.saturating_add(width) {
+                    records.replay_cells.insert((self.sheet_id, r, c));
+                    records.replay_links.insert((self.sheet_id, r, c));
+                }
+            }
+        }
+    }
+}
+fn formula_identity(cell: Option<&Cell>) -> Option<(i32, Option<ArrayKind>)> {
+    match cell? {
+        Cell::CellFormula { f, .. } => Some((*f, None)),
+        Cell::ArrayFormula { f, kind, .. } => Some((*f, Some(kind.clone()))),
+        _ => None,
+    }
+}
+
+/// Calculation still journals result changes, but never marks formula recreation.
+#[must_use]
+pub(crate) struct CalculationWritesGuard(Option<Arc<Mutex<MutationJournal>>>);
+impl Drop for CalculationWritesGuard {
+    fn drop(&mut self) {
+        if let Some(journal) = &self.0 {
+            journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .calculation_depth -= 1;
         }
     }
 }
@@ -207,6 +282,17 @@ impl Model<'_> {
         let flag = Arc::clone(&self.evaluation.display.stored_reads);
         let previous = flag.swap(true, Ordering::Relaxed);
         StoredReadsGuard(flag, previous)
+    }
+
+    pub(crate) fn observe_calculation_writes(&self) -> CalculationWritesGuard {
+        let journal = self.evaluation.display.journal.clone();
+        if let Some(journal) = &journal {
+            journal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .calculation_depth += 1;
+        }
+        CalculationWritesGuard(journal)
     }
 
     pub(crate) fn start_display_journal(&mut self) {
@@ -267,8 +353,34 @@ impl Model<'_> {
             .enumerate()
             .map(|(index, ws)| (ws.sheet_id, index))
             .collect();
-        let replay_cells = std::mem::take(&mut records.replay_cells);
-        let replay_links = std::mem::take(&mut records.replay_links);
+        let records_formulas = std::mem::take(&mut records.formulas);
+        let mut replay_cells = std::mem::take(&mut records.replay_cells);
+        let mut replay_links = std::mem::take(&mut records.replay_links);
+        for (position, original) in records_formulas {
+            let current = sheets
+                .get(&position.0)
+                .and_then(|&i| self.workbook.worksheets[i].cell(position.1, position.2));
+            if original != formula_identity(current.as_deref()) && !replay_cells.contains(&position)
+            {
+                let mut extents = vec![(1, 1)];
+                if let Some(Some(CachedCell::Formula(_, Some((_, extent))))) =
+                    records.cells.get(&position)
+                {
+                    extents.push(*extent);
+                }
+                if let Some(Cell::ArrayFormula { r, .. }) = current.as_deref() {
+                    extents.push(*r);
+                }
+                for (width, height) in extents {
+                    for row in position.1..position.1.saturating_add(height) {
+                        for column in position.2..position.2.saturating_add(width) {
+                            replay_cells.insert((position.0, row, column));
+                            replay_links.insert((position.0, row, column));
+                        }
+                    }
+                }
+            }
+        }
         let cells = records
             .cells
             .drain()
@@ -349,21 +461,6 @@ impl Model<'_> {
         }
     }
 
-    /// Re-entering a rewritten formula also destroys equal caches on redo.
-    pub(crate) fn retain_formula_replay(&self, area: &crate::expressions::types::Area) {
-        if let Some(journal) = &self.evaluation.display.journal {
-            let id = self.workbook.worksheets[area.sheet as usize].sheet_id;
-            let mut records = journal.lock().unwrap_or_else(|e| e.into_inner());
-            for row in area.row..area.row + area.height {
-                for column in area.column..area.column + area.width {
-                    let p = (id, row, column);
-                    records.replay_cells.insert(p);
-                    records.replay_links.insert(p);
-                }
-            }
-        }
-    }
-
     fn record_dynamic_link(&self, position: (u32, i32, i32)) {
         if let Some(journal) = &self.evaluation.display.journal {
             if let Some(ws) = self.workbook.worksheets.get(position.0 as usize) {
@@ -412,6 +509,27 @@ impl Model<'_> {
         if self.evaluation.display.edit_depth != 0 {
             return;
         }
+        let requested = std::mem::take(&mut self.evaluation.display.calculation_requested);
+        let formatting = std::mem::take(&mut self.evaluation.display.formatting_requested);
+        let touched = self
+            .evaluation
+            .display
+            .journal
+            .as_ref()
+            .is_some_and(|journal| {
+                !journal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .cells
+                    .is_empty()
+            });
+        // Rejected no-op edits have no orphan owners or overlays to reconcile.
+        if !requested && !formatting && !touched {
+            if recover && self.evaluation.display.formatting_recovery {
+                self.evaluate_conditional_formatting();
+            }
+            return;
+        }
         let positions: Vec<_> = if let Some(journal) = &self.evaluation.display.journal {
             let records = journal.lock().unwrap_or_else(|e| e.into_inner());
             records
@@ -429,6 +547,10 @@ impl Model<'_> {
             self.links.keys().copied().collect()
         };
         for position in positions {
+            #[cfg(test)]
+            {
+                self.evaluation.display.link_cleanup_visits += 1;
+            }
             if !self
                 .workbook
                 .worksheets
@@ -439,8 +561,6 @@ impl Model<'_> {
                 self.remove_dynamic_link(&position);
             }
         }
-        let requested = std::mem::take(&mut self.evaluation.display.calculation_requested);
-        let formatting = std::mem::take(&mut self.evaluation.display.formatting_requested);
         if calculate && requested {
             self.evaluate();
         } else if formatting || (recover && self.evaluation.display.formatting_recovery) {

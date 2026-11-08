@@ -707,6 +707,7 @@ impl<'a> Model<'a> {
     /// Calculates without rebuilding conditional-formatting/UI caches.
     pub fn evaluate_headless(&mut self) {
         let _clock = self.start_calculation_clock();
+        let _writes = self.observe_calculation_writes();
         #[cfg(test)]
         {
             self.evaluation.full_evaluations += 1;

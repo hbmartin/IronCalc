@@ -2867,7 +2867,7 @@ impl<'a> Model<'a> {
         // just use set user input on every cell
         for r in row..row + height {
             for c in column..column + width {
-                self.set_user_input(sheet, r, c, value.to_string())?;
+                self.set_user_input_with_styles(sheet, r, c, value.to_string(), styles)?;
             }
         }
 
@@ -3339,35 +3339,46 @@ impl<'a> Model<'a> {
 
     fn invalidate_clear(&mut self, area: &Area) -> Result<(), String> {
         let ws = self.workbook.worksheet(area.sheet)?;
-        let arrays = (area.row..area.row + area.height).any(|r| {
-            ws.sheet_data
-                .cells_in_row_between(r, area.column, area.column + area.width - 1)
-                .any(|(_, c)| matches!(&*c, Cell::ArrayFormula { .. } | Cell::SpillCell { .. }))
-        });
-        if !arrays
-            && self.evaluation.scalar_only == Some(true)
-            && (self.evaluation.report.converged || self.evaluation.pending_scalar_clears.is_some())
+        if self.evaluation.scalar_only != Some(true)
+            || (!self.evaluation.report.converged
+                && self.evaluation.pending_scalar_clears.is_none())
         {
-            let cleared: Vec<_> = (area.row..area.row + area.height)
-                .flat_map(|row| {
-                    ws.sheet_data
-                        .cells_in_row_between(row, area.column, area.column + area.width - 1)
-                        .filter(|(_, cell)| !matches!(&**cell, Cell::EmptyCell { .. }))
-                        .map(move |(column, _)| (area.sheet, row, column))
-                })
-                .collect();
-            let mut pending = self
-                .evaluation
-                .pending_scalar_clears
-                .take()
-                .unwrap_or_default();
-            pending.extend(cleared);
-            self.invalidate_report();
-            self.evaluation.pending_scalar_clears = Some(pending);
-            self.evaluation.display.formatting_requested |= self.evaluation.display.edit_depth > 0;
-        } else {
             self.invalidate_calculation();
+            return Ok(());
         }
+        let mut cleared = Vec::new();
+        let mut arrays = false;
+        'scan: for row in area.row..area.row + area.height {
+            for (column, cell) in
+                ws.sheet_data
+                    .cells_in_row_between(row, area.column, area.column + area.width - 1)
+            {
+                #[cfg(test)]
+                {
+                    self.evaluation.display.clear_scan_visits += 1;
+                }
+                if matches!(&*cell, Cell::ArrayFormula { .. } | Cell::SpillCell { .. }) {
+                    arrays = true;
+                    break 'scan;
+                }
+                if !matches!(&*cell, Cell::EmptyCell { .. }) {
+                    cleared.push((area.sheet, row, column));
+                }
+            }
+        }
+        if arrays {
+            self.invalidate_calculation();
+            return Ok(());
+        }
+        let mut pending = self
+            .evaluation
+            .pending_scalar_clears
+            .take()
+            .unwrap_or_default();
+        pending.extend(cleared);
+        self.invalidate_report();
+        self.evaluation.pending_scalar_clears = Some(pending);
+        self.evaluation.display.formatting_requested |= self.evaluation.display.edit_depth > 0;
         Ok(())
     }
 

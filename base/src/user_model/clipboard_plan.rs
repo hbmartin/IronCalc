@@ -5,7 +5,7 @@ use crate::{
     types::{Cell, Workbook, Worksheet},
     Model, UserModel,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(super) struct PreparedClipboard<'a> {
     staged: UserModel<'a>,
@@ -14,34 +14,139 @@ pub(super) struct PreparedClipboard<'a> {
     links: Vec<((u32, i32, i32), Option<crate::types::Link>)>,
 }
 
+// Balanced spatial bounds avoid checking every array-owner rectangle per write.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Rectangle {
+    row: i64,
+    column: i64,
+    bottom: i64,
+    right: i64,
+}
+impl Rectangle {
+    fn of(a: &Area) -> Self {
+        Self {
+            row: i64::from(a.row),
+            column: i64::from(a.column),
+            bottom: i64::from(a.row) + i64::from(a.height),
+            right: i64::from(a.column) + i64::from(a.width),
+        }
+    }
+    fn contains(self, row: i64, column: i64) -> bool {
+        self.row <= row && row < self.bottom && self.column <= column && column < self.right
+    }
+    fn covers(self, other: Self) -> bool {
+        self.row <= other.row
+            && self.column <= other.column
+            && self.bottom >= other.bottom
+            && self.right >= other.right
+    }
+    fn union(self, other: Self) -> Self {
+        Self {
+            row: self.row.min(other.row),
+            column: self.column.min(other.column),
+            bottom: self.bottom.max(other.bottom),
+            right: self.right.max(other.right),
+        }
+    }
+}
+struct RectangleIndex {
+    bounds: Rectangle,
+    children: Option<(Box<Self>, Box<Self>)>,
+}
+impl RectangleIndex {
+    fn build(mut rectangles: Vec<Rectangle>) -> Option<Box<Self>> {
+        let bounds = rectangles.iter().copied().reduce(Rectangle::union)?;
+        let children = if rectangles.len() == 1 {
+            None
+        } else {
+            let rows = bounds.bottom - bounds.row >= bounds.right - bounds.column;
+            rectangles.sort_unstable_by_key(|r| {
+                if rows {
+                    r.row + r.bottom
+                } else {
+                    r.column + r.right
+                }
+            });
+            let right = rectangles.split_off(rectangles.len() / 2);
+            Some((Self::build(rectangles)?, Self::build(right)?))
+        };
+        Some(Box::new(Self { bounds, children }))
+    }
+    fn contains(&self, row: i64, column: i64, visits: &mut usize) -> bool {
+        *visits += 1;
+        self.bounds.contains(row, column)
+            && self.children.as_ref().is_none_or(|(a, b)| {
+                a.contains(row, column, visits) || b.contains(row, column, visits)
+            })
+    }
+}
 #[derive(Default)]
 struct ClipboardFootprint {
     points: HashSet<(u32, i32, i32)>,
-    rectangles: Vec<Area>,
+    rectangles: HashMap<u32, HashSet<Rectangle>>,
+    primary: HashMap<u32, Vec<Rectangle>>,
+    indexes: HashMap<u32, Box<RectangleIndex>>,
+    #[cfg(test)]
+    visits: std::cell::Cell<usize>,
 }
 impl ClipboardFootprint {
+    fn new(primary: &[Area]) -> Self {
+        let mut result = Self::default();
+        for area in primary {
+            result
+                .primary
+                .entry(area.sheet)
+                .or_default()
+                .push(Rectangle::of(area));
+        }
+        result
+    }
     fn include(&mut self, area: &Area) {
         if area.width == 1 && area.height == 1 {
             self.points.insert((area.sheet, area.row, area.column));
         } else {
-            self.rectangles.push(Area {
-                sheet: area.sheet,
-                row: area.row,
-                column: area.column,
-                width: area.width,
-                height: area.height,
-            });
+            self.rectangles
+                .entry(area.sheet)
+                .or_default()
+                .insert(Rectangle::of(area));
+        }
+    }
+    fn finish(&mut self) {
+        for (sheet, rectangles) in self.rectangles.drain() {
+            let rectangles = rectangles
+                .into_iter()
+                .filter(|r| {
+                    !self
+                        .primary
+                        .get(&sheet)
+                        .is_some_and(|primary| primary.iter().any(|p| p.covers(*r)))
+                })
+                .collect();
+            if let Some(index) = RectangleIndex::build(rectangles) {
+                self.indexes.insert(sheet, index);
+            }
         }
     }
     fn contains(&self, (sheet, row, column): (u32, i32, i32)) -> bool {
-        self.points.contains(&(sheet, row, column))
-            || self.rectangles.iter().any(|a| {
-                sheet == a.sheet
-                    && row >= a.row
-                    && column >= a.column
-                    && i64::from(row) < i64::from(a.row) + i64::from(a.height)
-                    && i64::from(column) < i64::from(a.column) + i64::from(a.width)
-            })
+        if self.points.contains(&(sheet, row, column)) {
+            return true;
+        }
+        let (row, column) = (i64::from(row), i64::from(column));
+        if self
+            .primary
+            .get(&sheet)
+            .is_some_and(|primary| primary.iter().any(|r| r.contains(row, column)))
+        {
+            return true;
+        }
+        let mut visits = 0;
+        let result = self
+            .indexes
+            .get(&sheet)
+            .is_some_and(|index| index.contains(row, column, &mut visits));
+        #[cfg(test)]
+        self.visits.set(self.visits.get() + visits);
+        result
     }
     fn check(&self, position: (u32, i32, i32)) -> Result<(), String> {
         if self.contains(position) {
@@ -110,7 +215,7 @@ impl<'a> UserModel<'a> {
         }
         let mut positions = HashSet::new();
         let mut owners = HashSet::new();
-        let mut footprint = ClipboardFootprint::default();
+        let mut footprint = ClipboardFootprint::new(&areas[..2]);
         while let Some(area) = areas.pop() {
             footprint.include(&area);
             let ws = self.model.workbook.worksheet(area.sheet)?;
@@ -144,6 +249,7 @@ impl<'a> UserModel<'a> {
                 }
             }
         }
+        footprint.finish();
         let mut staged = UserModel::from_model(self.model.clipboard_stage(&positions));
         staged.view = self.view.clone();
         staged.pause_evaluation = true;
@@ -330,5 +436,71 @@ impl<'a> Model<'a> {
             }
         }
         model
+    }
+}
+
+#[cfg(test)]
+mod footprint_tests {
+    use super::*;
+    #[test]
+    fn spatial_lookup_deduplicates_groups_and_bounds_query_work() {
+        let mut f = ClipboardFootprint::default();
+        for r in 0..100 {
+            for c in 0..100 {
+                let a = Area {
+                    sheet: 0,
+                    row: r * 4 + 1,
+                    column: c * 4 + 1,
+                    width: 2,
+                    height: 2,
+                };
+                f.include(&a);
+                f.include(&a);
+            }
+        }
+        assert_eq!(f.rectangles[&0].len(), 10000);
+        f.finish();
+        for (r, c) in [(1, 1), (201, 201), (397, 397), (400, 400)] {
+            let before = f.visits.get();
+            assert_eq!(f.contains((0, r, c)), r % 4 == 1 && c % 4 == 1);
+            assert!(f.visits.get() - before < 80);
+        }
+        let before = f.visits.get();
+        assert!(!f.contains((1, 1, 1)));
+        assert_eq!(f.visits.get(), before);
+    }
+    #[test]
+    fn primary_and_extreme_extents_do_not_expand_into_rows() {
+        let a = Area {
+            sheet: 0,
+            row: 1,
+            column: 1,
+            width: 20,
+            height: i32::MAX,
+        };
+        let mut f = ClipboardFootprint::new(&[a]);
+        for r in 1..1000 {
+            f.include(&Area {
+                sheet: 0,
+                row: r,
+                column: 1,
+                width: 2,
+                height: 2,
+            });
+        }
+        f.finish();
+        assert!(f.indexes.is_empty());
+        assert!(f.contains((0, i32::MAX, 20)));
+        assert!(!f.contains((0, i32::MAX, 21)));
+        assert_eq!(f.visits.get(), 0);
+        f.include(&Area {
+            sheet: 1,
+            row: i32::MAX - 1,
+            column: i32::MAX - 1,
+            width: i32::MAX,
+            height: i32::MAX,
+        });
+        f.finish();
+        assert!(f.contains((1, i32::MAX, i32::MAX)));
     }
 }

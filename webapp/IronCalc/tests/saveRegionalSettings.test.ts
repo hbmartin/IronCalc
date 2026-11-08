@@ -1,10 +1,22 @@
+import { execFileSync } from "node:child_process";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { initSync, Model } from "@ironcalc/wasm";
 import { beforeAll, expect, test, vi } from "vitest";
 import {
   saveAndRedrawRegionalSettings,
   saveRegionalSettings,
 } from "../src/components/RightDrawer/RegionalSettings/saveRegionalSettings";
+import { formulaLanguageIds } from "../src/generated/formulaLanguageIds";
 
 beforeAll(async () => {
   initSync({
@@ -238,19 +250,121 @@ test.each([
   }
 });
 
-test("build-time formula language IDs match the engine source and real WASM", async () => {
+test("generated formula language IDs match the engine source and real WASM", async () => {
   const source = JSON.parse(
     await readFile(
       new URL("../../../generate_language/src/languages.json", import.meta.url),
       "utf8",
     ),
   );
-  expect([...__IC_FORMULA_LANGUAGE_IDS__].sort()).toEqual(
-    Object.keys(source).sort(),
-  );
+  expect([...formulaLanguageIds].sort()).toEqual(Object.keys(source).sort());
   const model = newModel();
-  for (const language of __IC_FORMULA_LANGUAGE_IDS__) {
+  for (const language of formulaLanguageIds) {
     expect(saveRegionalSettings(model, "en", "UTC", language).error).toBeNull();
     expect(model.getLanguage()).toBe(language);
+  }
+});
+
+test("regional settings source imports without consumer build definitions", () => {
+  execFileSync(
+    process.execPath,
+    [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "-e",
+      'await import("./src/components/RightDrawer/RegionalSettings/saveRegionalSettings.ts")',
+    ],
+    { cwd: process.cwd(), stdio: "pipe" },
+  );
+});
+
+test("committed language IDs pass the read-only generator check", () => {
+  execFileSync(
+    process.execPath,
+    ["scripts/generate-language-ids.js", "--check"],
+    { stdio: "pipe" },
+  );
+});
+
+test("changed context batches produce the canonical real-WASM rejection", () => {
+  const sender = newModel();
+  const receiver = Model.fromBytes(sender.toBytes(), "en");
+  sender.setTimezone("Europe/Paris");
+  receiver.pauseEvaluation();
+  let rejection: unknown;
+  try {
+    receiver.applyExternalDiffs(sender.flushSendQueue());
+  } catch (cause) {
+    rejection = cause;
+  }
+  expect(rejection).toBeInstanceOf(Error);
+  expect((rejection as Error).message).toBe(
+    "Cannot change calculation context while evaluation is paused",
+  );
+  const model = newModel();
+  vi.spyOn(model, "setLocale").mockImplementation(() => {
+    throw rejection;
+  });
+  expect(saveRegionalSettings(model, "fr", "UTC", "en").error?.code).toBe(
+    "paused",
+  );
+});
+
+test("permissively loaded invalid iteration settings use the real rejection contract", async () => {
+  const bytes = await readFile(
+    new URL("./fixtures/invalid-iterations.ic", import.meta.url),
+  );
+  const model = Model.fromBytes(bytes, "en");
+  const before = model.toBytes();
+  expect(saveRegionalSettings(model, "fr", "Europe/Paris", "en").error).toEqual(
+    {
+      code: "invalid_iteration",
+      detail:
+        "Cannot change calculation context with invalid iterative calculation settings",
+    },
+  );
+  expect(model.toBytes()).toEqual(before);
+  expect(model.getLocale()).toBe("en");
+  expect(model.getTimezone()).toBe("UTC");
+});
+
+test("stale language generation is detected without rewriting its output", () => {
+  const root = mkdtempSync(join(tmpdir(), "ironcalc-language-ids-"));
+  try {
+    const project = join(root, "webapp/IronCalc");
+    for (const dir of ["scripts", "src/generated"]) {
+      mkdirSync(join(project, dir), { recursive: true });
+    }
+    mkdirSync(join(root, "generate_language/src"), { recursive: true });
+    writeFileSync(join(root, "package.json"), '{"type":"module"}');
+    writeFileSync(
+      join(root, "generate_language/src/languages.json"),
+      '{"en":{},"de":{}}',
+    );
+    copyFileSync(
+      "scripts/generate-language-ids.js",
+      join(project, "scripts/generate-language-ids.js"),
+    );
+    const output = join(project, "src/generated/formulaLanguageIds.ts");
+    writeFileSync(output, "stale");
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        ["scripts/generate-language-ids.js", "--check"],
+        { cwd: project, stdio: "pipe" },
+      ),
+    ).toThrow();
+    expect(readFileSync(output, "utf8")).toBe("stale");
+    execFileSync(process.execPath, ["scripts/generate-language-ids.js"], {
+      cwd: project,
+    });
+    execFileSync(
+      process.execPath,
+      ["scripts/generate-language-ids.js", "--check"],
+      { cwd: project },
+    );
+    expect(readFileSync(output, "utf8")).toContain('"de",\n  "en"');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
