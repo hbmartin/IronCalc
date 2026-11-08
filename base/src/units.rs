@@ -3,6 +3,7 @@ use crate::{
     formatter::parser::{ParsePart, Parser},
     functions::Function,
     model::Model,
+    types::Style,
 };
 
 pub enum Units {
@@ -88,23 +89,26 @@ fn get_units_from_format_string(num_fmt: &str) -> Option<Units> {
     }
 }
 
+/// Clipboard preparation supplies a full read context without copying its cells.
+pub(crate) type StyleResolver<'r> =
+    dyn Fn(&Model<'_>, CellReferenceIndex) -> Result<Style, String> + 'r;
+
 impl<'a> Model<'a> {
-    fn compute_cell_units(&self, cell_reference: &CellReferenceIndex) -> Option<Units> {
-        let cell_style_res = &self.get_style_for_cell(
-            cell_reference.sheet,
-            cell_reference.row,
-            cell_reference.column,
-        );
-        match cell_style_res {
-            Ok(style) => get_units_from_format_string(&style.num_fmt),
-            Err(_) => None,
-        }
+    fn compute_cell_units(
+        &self,
+        cell: CellReferenceIndex,
+        styles: &StyleResolver<'_>,
+    ) -> Option<Units> {
+        styles(self, cell)
+            .ok()
+            .and_then(|style| get_units_from_format_string(&style.num_fmt))
     }
 
-    pub(crate) fn compute_node_units(
+    pub(crate) fn compute_node_units_with_styles(
         &self,
         node: &Node,
         cell: &CellReferenceIndex,
+        styles: &StyleResolver<'_>,
     ) -> Option<Units> {
         match node {
             Node::ReferenceKind {
@@ -123,11 +127,14 @@ impl<'a> Model<'a> {
                 if !absolute_column {
                     column1 += cell.column;
                 }
-                self.compute_cell_units(&CellReferenceIndex {
-                    sheet: *sheet_index,
-                    row: row1,
-                    column: column1,
-                })
+                self.compute_cell_units(
+                    CellReferenceIndex {
+                        sheet: *sheet_index,
+                        row: row1,
+                        column: column1,
+                    },
+                    styles,
+                )
             }
             Node::RangeKind {
                 sheet_name: _,
@@ -150,19 +157,22 @@ impl<'a> Model<'a> {
                 if !absolute_column1 {
                     column1 += cell.column;
                 }
-                self.compute_cell_units(&CellReferenceIndex {
-                    sheet: *sheet_index,
-                    row: row1,
-                    column: column1,
-                })
+                self.compute_cell_units(
+                    CellReferenceIndex {
+                        sheet: *sheet_index,
+                        row: row1,
+                        column: column1,
+                    },
+                    styles,
+                )
             }
             Node::OpSumKind {
                 kind: _,
                 left,
                 right,
             } => {
-                let left_units = self.compute_node_units(left, cell);
-                let right_units = self.compute_node_units(right, cell);
+                let left_units = self.compute_node_units_with_styles(left, cell, styles);
+                let right_units = self.compute_node_units_with_styles(right, cell, styles);
                 match (&left_units, &right_units) {
                     (Some(_), None) => left_units,
                     (None, Some(_)) => right_units,
@@ -177,8 +187,8 @@ impl<'a> Model<'a> {
                 }
             }
             Node::OpProductKind { kind, left, right } => {
-                let left_units = self.compute_node_units(left, cell);
-                let right_units = self.compute_node_units(right, cell);
+                let left_units = self.compute_node_units_with_styles(left, cell, styles);
+                let right_units = self.compute_node_units_with_styles(right, cell, styles);
                 match (&left_units, &right_units) {
                     (
                         Some(Units::Percentage { precision: l, .. }),
@@ -276,10 +286,12 @@ impl<'a> Model<'a> {
                     _ => None,
                 }
             }
-            Node::FunctionKind { kind, args } => self.compute_function_units(kind, args, cell),
+            Node::FunctionKind { kind, args } => {
+                self.compute_function_units(kind, args, cell, styles)
+            }
             Node::UnaryKind { kind: _, right } => {
                 // What happens if kind => OpUnary::Percentage?
-                self.compute_node_units(right, cell)
+                self.compute_node_units_with_styles(right, cell, styles)
             }
             // The rest of the nodes return None
             Node::BooleanKind(_) => None,
@@ -311,10 +323,11 @@ impl<'a> Model<'a> {
         kind: &Function,
         args: &[Node],
         cell: &CellReferenceIndex,
+        styles: &StyleResolver<'_>,
     ) -> Option<Units> {
         match kind {
-            Function::Sum => self.units_fn_sum_like(args, cell),
-            Function::Average => self.units_fn_sum_like(args, cell),
+            Function::Sum => self.units_fn_sum_like(args, cell, styles),
+            Function::Average => self.units_fn_sum_like(args, cell, styles),
             Function::Pmt => self.units_fn_currency(args, cell),
             Function::Fv => self.units_fn_currency(args, cell),
             Function::Nper => self.units_fn_currency(args, cell),
@@ -337,10 +350,15 @@ impl<'a> Model<'a> {
         }
     }
 
-    fn units_fn_sum_like(&self, args: &[Node], cell: &CellReferenceIndex) -> Option<Units> {
+    fn units_fn_sum_like(
+        &self,
+        args: &[Node],
+        cell: &CellReferenceIndex,
+        styles: &StyleResolver<'_>,
+    ) -> Option<Units> {
         // We return the unit of the first argument
         if !args.is_empty() {
-            return self.compute_node_units(&args[0], cell);
+            return self.compute_node_units_with_styles(&args[0], cell, styles);
         }
         None
     }

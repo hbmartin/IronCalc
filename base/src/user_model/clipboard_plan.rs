@@ -14,6 +14,44 @@ pub(super) struct PreparedClipboard<'a> {
     links: Vec<((u32, i32, i32), Option<crate::types::Link>)>,
 }
 
+#[derive(Default)]
+struct ClipboardFootprint {
+    points: HashSet<(u32, i32, i32)>,
+    rectangles: Vec<Area>,
+}
+impl ClipboardFootprint {
+    fn include(&mut self, area: &Area) {
+        if area.width == 1 && area.height == 1 {
+            self.points.insert((area.sheet, area.row, area.column));
+        } else {
+            self.rectangles.push(Area {
+                sheet: area.sheet,
+                row: area.row,
+                column: area.column,
+                width: area.width,
+                height: area.height,
+            });
+        }
+    }
+    fn contains(&self, (sheet, row, column): (u32, i32, i32)) -> bool {
+        self.points.contains(&(sheet, row, column))
+            || self.rectangles.iter().any(|a| {
+                sheet == a.sheet
+                    && row >= a.row
+                    && column >= a.column
+                    && i64::from(row) < i64::from(a.row) + i64::from(a.height)
+                    && i64::from(column) < i64::from(a.column) + i64::from(a.width)
+            })
+    }
+    fn check(&self, position: (u32, i32, i32)) -> Result<(), String> {
+        if self.contains(position) {
+            Ok(())
+        } else {
+            Err("Clipboard preparation wrote outside its validated footprint".into())
+        }
+    }
+}
+
 impl<'a> UserModel<'a> {
     pub(super) fn prepare_clipboard_commit(
         &self,
@@ -72,7 +110,9 @@ impl<'a> UserModel<'a> {
         }
         let mut positions = HashSet::new();
         let mut owners = HashSet::new();
+        let mut footprint = ClipboardFootprint::default();
         while let Some(area) = areas.pop() {
+            footprint.include(&area);
             let ws = self.model.workbook.worksheet(area.sheet)?;
             for row in area.row..area.row + area.height {
                 for (column, cell) in ws.sheet_data.cells_in_row_between(
@@ -107,7 +147,7 @@ impl<'a> UserModel<'a> {
         let mut staged = UserModel::from_model(self.model.clipboard_stage(&positions));
         staged.view = self.view.clone();
         staged.pause_evaluation = true;
-        let mut scope = crate::display::DisplayEditGuard::new(&mut staged, false);
+        let mut scope = crate::display::DisplayEditGuard::new(&mut staged);
         scope.target().model.start_display_journal();
         scope.target().paste_from_clipboard_in_display_edit(
             source_sheet,
@@ -115,9 +155,42 @@ impl<'a> UserModel<'a> {
             clipboard,
             is_cut,
             plan,
+            &|staged, cell| {
+                let model = if footprint.contains((cell.sheet, cell.row, cell.column)) {
+                    staged
+                } else {
+                    &self.model
+                };
+                model.get_style_for_cell(cell.sheet, cell.row, cell.column)
+            },
         )?;
+        #[cfg(test)]
+        if let Some(hook) = self.model.evaluation.display.paste_hook {
+            hook(&mut scope.target().model);
+        }
         let cells = scope.target().model.prepared_display_cells();
         let links = scope.target().model.prepared_dynamic_links();
+        for &(sheet, row, column, _) in &cells {
+            footprint.check((sheet, row, column))?;
+        }
+        for &(position, _) in &links {
+            footprint.check(position)?;
+        }
+        // Manual links live in worksheet metadata, outside the cell observer.
+        for (sheet, (original, staged)) in self
+            .model
+            .workbook
+            .worksheets
+            .iter()
+            .zip(&scope.target().model.workbook.worksheets)
+            .enumerate()
+        {
+            for &(row, column) in original.links.keys().chain(staged.links.keys()) {
+                if original.links.get(&(row, column)) != staged.links.get(&(row, column)) {
+                    footprint.check((sheet as u32, row, column))?;
+                }
+            }
+        }
         let replay = scope.target().model.take_display_journal();
         scope.cancel();
         scope.complete();
@@ -140,6 +213,8 @@ impl<'a> UserModel<'a> {
         #[cfg(test)]
         {
             self.model.evaluation.display.paste_cells = cells.len();
+            self.model.evaluation.display.cse_discovery_visits =
+                staged.model.evaluation.display.cse_discovery_visits;
         }
         self.model.invalidate_calculation();
         for (sheet, row, column, cell) in cells {

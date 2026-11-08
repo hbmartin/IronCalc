@@ -2391,22 +2391,16 @@ impl<'a> UserModel<'a> {
         height: i32,
         formula: &str,
     ) -> Result<(), String> {
-        let ws = self.model.workbook.worksheet(sheet)?;
-        let mut old_values = Vec::new();
-        for r in row..row + height {
-            let mut row_vals = Vec::new();
-            for c in column..column + width {
-                let cell = ws.cell(r, c).map(Cow::into_owned);
-                // SpillCells are transient — restored by re-evaluation, so store as None.
-                let cell = if matches!(cell, Some(Cell::SpillCell { .. })) {
-                    None
-                } else {
-                    cell
-                };
-                row_vals.push(cell);
-            }
-            old_values.push(row_vals);
-        }
+        let old_values = self.capture_area_values(
+            &Area {
+                sheet,
+                row,
+                column,
+                width,
+                height,
+            },
+            super::clipboard::SpillCapture::Omit,
+        )?;
         self.model
             .set_user_array_formula(sheet, row, column, width, height, formula)?;
         self.push_diff_list(vec![Diff::SetArrayValue {

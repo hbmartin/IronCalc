@@ -403,7 +403,7 @@ impl RestartLog {
 
 /// Everything the evaluation needs besides the workbook itself.
 pub(crate) struct Evaluation {
-    pub(crate) incremental_after_clear: bool,
+    pub(crate) pending_scalar_clears: Option<HashSet<CellKey>>,
     /// The dynamic anchors, in the order in which they are evaluated. Kept
     /// across evaluations: the order the restarts arrived at stays, so the
     /// next evaluation needs no restart. New anchors are appended in natural
@@ -534,7 +534,7 @@ fn default_max_depth() -> usize {
 impl Default for Evaluation {
     fn default() -> Self {
         Evaluation {
-            incremental_after_clear: false,
+            pending_scalar_clears: None,
             anchor_order: Vec::new(),
             cells: HashMap::default(),
             stack: Vec::new(),
@@ -664,14 +664,19 @@ impl<'a> Model<'a> {
             return false;
         }
         self.evaluation.require_two_iterative_passes = required;
-        self.evaluation.report = CalculationReport::default();
-        self.evaluation.incremental_after_clear = false;
+        self.invalidate_report();
         true
     }
 
     /// Whether circular calculations require two completed passes (default true).
     pub fn get_require_two_iterative_passes(&self) -> bool {
         self.evaluation.require_two_iterative_passes
+    }
+
+    /// Report-only invalidation also retires any retained incremental baseline.
+    pub(crate) fn invalidate_report(&mut self) {
+        self.evaluation.report = CalculationReport::default();
+        self.evaluation.pending_scalar_clears = None;
     }
 
     /// Invalidate caches before a structural mutation, including mutations
@@ -681,8 +686,7 @@ impl<'a> Model<'a> {
         self.evaluation.cells.clear();
         self.evaluation.circular.clear();
         self.evaluation.scalar_only = None;
-        self.evaluation.report = CalculationReport::default();
-        self.evaluation.incremental_after_clear = false;
+        self.invalidate_report();
         self.evaluation.display.formatting_requested |= self.evaluation.display.edit_depth > 0;
     }
 
@@ -710,8 +714,7 @@ impl<'a> Model<'a> {
         self.dependency_index = None;
         self.evaluation.scalar_only = None;
         let settings = self.workbook.settings.iterative_calculation.clone();
-        self.evaluation.report = CalculationReport::default();
-        self.evaluation.incremental_after_clear = false;
+        self.invalidate_report();
         self.evaluation.recursion_limit_hit = false;
         self.evaluation.lambda_depth = 0;
         if settings.enabled && settings.validate().is_err() {
@@ -969,8 +972,7 @@ impl<'a> Model<'a> {
         let depth = depth.max(1);
         if self.evaluation.max_lambda_depth != depth {
             self.evaluation.max_lambda_depth = depth;
-            self.evaluation.report = CalculationReport::default();
-            self.evaluation.incremental_after_clear = false;
+            self.invalidate_report();
         }
     }
 
@@ -1045,8 +1047,7 @@ impl<'a> Model<'a> {
     pub fn set_max_evaluation_stack(&mut self, bytes: usize) {
         if self.evaluation.max_stack != bytes {
             self.evaluation.max_stack = bytes;
-            self.evaluation.report = CalculationReport::default();
-            self.evaluation.incremental_after_clear = false;
+            self.invalidate_report();
         }
     }
 
