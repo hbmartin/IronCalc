@@ -370,11 +370,14 @@ impl<'a> UserModel<'a> {
         let mut cse_sources = HashMap::new();
         if is_cut {
             let (r1, c1, r2, c2) = source_range;
-            let (sources, _visits) = self.clipboard_cse_sources(source_sheet, (r1, c1, r2, c2))?;
+            #[cfg(test)]
+            let before = crate::sheet_data::SheetData::cell_visits();
+            let sources = self.clipboard_cse_sources(source_sheet, (r1, c1, r2, c2))?;
             cse_sources = sources;
             #[cfg(test)]
             {
-                self.model.evaluation.display.cse_discovery_visits += _visits;
+                self.model.evaluation.display.cse_discovery_visits +=
+                    crate::sheet_data::SheetData::cell_visits() - before;
             }
             for (&(row, column), &(width, height)) in &cse_sources {
                 self.clear_prepared_cse(source_sheet, row, column, width, height, &mut diff_list)?;
@@ -967,13 +970,11 @@ impl<'a> UserModel<'a> {
         &self,
         sheet: u32,
         (r1, c1, r2, c2): ClipboardTuple,
-    ) -> Result<(CseSources, usize), String> {
+    ) -> Result<CseSources, String> {
         let ws = self.model.workbook.worksheet(sheet)?;
         let mut sources = HashMap::new();
-        let mut visits = 0;
         for row in r1..=r2 {
             for (column, cell) in ws.sheet_data.cells_in_row_between(row, c1, c2) {
-                visits += 1;
                 if let Cell::ArrayFormula {
                     kind: ArrayKind::Cse,
                     r,
@@ -984,7 +985,7 @@ impl<'a> UserModel<'a> {
                 }
             }
         }
-        Ok((sources, visits))
+        Ok(sources)
     }
 
     fn set_prepared_array(

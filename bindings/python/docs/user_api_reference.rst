@@ -397,3 +397,19 @@ Workbook properties
 
    Resolves a color to a CSS hex string using the current workbook theme;
    returns ``""`` for no color.
+
+Display history and failed replay
+--------------------------------
+
+Local display supplements retain complete affected spill ownership and equal
+results required by formula recreation. Structural reference rewrites preserve
+current values without adding unrelated equal caches to history. Supplements
+are runtime-only; they are not encoded or sent to collaborators.
+
+A live edit or replay can fail after partially applying changes. Value and
+ownership changes invalidate the calculation report and block evaluation-session
+forks until a successful calculation. Cleanup reconciles dynamic links and
+conditional formatting from stored results without calculating formulas or
+refreshing an existing display timestamp. A rejected edit with no mutations or
+pending effects performs no cleanup. These rules do not roll back partial edits
+or change history-stack and outgoing-queue error behavior.

@@ -118,17 +118,39 @@ broader snapshots. Journals do not affect encoded bytes or equality, and clones,
 loads and forks start without active observation.
 
 Structural remapping and cell movement mark only positions whose ownership moves
-or disappears, plus their destinations and affected spill groups. Identity
-restoration skips unchanged payloads. Unrelated equal caches are not retained
-in structural history. Replay-sensitive display entries are retained even when the cached payload at a position
-compares equal: undo/redo first moves cells, so position equality alone cannot
-identify redundant history. Ordinary calculation and style writes still omit equal payloads. Formula
-replacement/recreation is tracked at cell storage, including identical formula
-text and delete/recreate operations. These writes retain equal results and
-associated spill/link ownership for paused replay; the journal distinguishes
-calculation-result writes through an owned scope that also unwinds safely. Merge
-operations transfer cached formula results and dynamic links to their anchor;
-paused autofill marks calculation out of date without running a pass.
+or disappears, plus their destinations and complete affected spill groups.
+Splitting or collapsing a spill captures identity-mapped children and vacant
+mapped positions too, so paused replay neither loses equal children nor leaves
+phantom spill values. Replay removes obsolete children before restoring anchors,
+children and links. An absent dynamic-link entry is retained when replay needs
+it to remove a temporarily remapped link, even if both completed states lack one.
+
+Identity restoration skips unchanged payloads. Unrelated equal caches are not
+retained in structural history. User formula replacement/recreation, including
+identical formula text and delete/recreate operations, retains equal cached
+results and associated spill/link ownership. Explicit owned write scopes
+distinguish recreation, structural reference rewriting, calculation, styles and
+spill reshaping. Reference rewriting updates the expected formula identity
+without forcing equal caches into history; a paused structural undo therefore
+preserves current dependent values after a collaborator changes their inputs.
+Calculation and style writes continue omitting equal payloads. One journal entry
+holds the original cell, expected formula identity and replay metadata for each
+touched position, without a second per-position formula map. Spill ownership
+footprints are deduplicated within the edit. Merge operations transfer cached
+formula results and dynamic links to their anchor; paused autofill marks
+calculation out of date without running a pass.
+
+All outer edit scopes observe mutation activity, including raw batches and
+undo/redo/external replay that do not record local history. Unrecorded scopes
+release their observation after finalization and do not capture calculation
+results. A failed live batch may retain partial mutations; it does not roll them
+back or publish a completed undo/redo batch. Applied value/ownership writes
+invalidate reports and dependencies even when a later diff fails, reconcile
+orphaned dynamic links and rebuild conditional formatting from stored results.
+Cleanup runs no formula calculation and reuses an existing display timestamp.
+Rejected edits with no writes or pending effects skip cleanup and leave reports,
+dependencies, overlays, links and clocks unchanged. History and collaboration
+error semantics remain otherwise unchanged.
 
 Display supplements share immutable storage across undo/redo. Remote conflict
 pruning uses copy-on-write, preserving exact volatile results without copying
@@ -386,3 +408,10 @@ Locale/timezone transition preflight rejects a whole incoming batch while paused
 or when enabled iteration settings are invalid at that transition; iteration
 setting changes alone remain allowed while paused. The Python retry example
 catches WorkbookError and lets unrelated failures propagate.
+
+The clipboard footprint is built through a consuming builder: membership queries
+are available only after its spatial index is finalized. CSE discovery returns
+only array ownership; operation counts are measured by test-only callers. The
+shared invalid-iteration binary fixture belongs to `base/tests/fixtures`; Rust
+and real-WASM tests read the same bytes. A native package smoke check verifies
+that the packaged base tests compile without the surrounding webapp checkout.

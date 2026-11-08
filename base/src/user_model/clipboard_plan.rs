@@ -81,15 +81,19 @@ impl RectangleIndex {
     }
 }
 #[derive(Default)]
-struct ClipboardFootprint {
+struct ClipboardFootprintBuilder {
     points: HashSet<(u32, i32, i32)>,
     rectangles: HashMap<u32, HashSet<Rectangle>>,
+    primary: HashMap<u32, Vec<Rectangle>>,
+}
+struct ClipboardFootprint {
+    points: HashSet<(u32, i32, i32)>,
     primary: HashMap<u32, Vec<Rectangle>>,
     indexes: HashMap<u32, Box<RectangleIndex>>,
     #[cfg(test)]
     visits: std::cell::Cell<usize>,
 }
-impl ClipboardFootprint {
+impl ClipboardFootprintBuilder {
     fn new(primary: &[Area]) -> Self {
         let mut result = Self::default();
         for area in primary {
@@ -111,8 +115,9 @@ impl ClipboardFootprint {
                 .insert(Rectangle::of(area));
         }
     }
-    fn finish(&mut self) {
-        for (sheet, rectangles) in self.rectangles.drain() {
+    fn finish(self) -> ClipboardFootprint {
+        let mut indexes = HashMap::new();
+        for (sheet, rectangles) in self.rectangles {
             let rectangles = rectangles
                 .into_iter()
                 .filter(|r| {
@@ -123,10 +128,19 @@ impl ClipboardFootprint {
                 })
                 .collect();
             if let Some(index) = RectangleIndex::build(rectangles) {
-                self.indexes.insert(sheet, index);
+                indexes.insert(sheet, index);
             }
         }
+        ClipboardFootprint {
+            points: self.points,
+            primary: self.primary,
+            indexes,
+            #[cfg(test)]
+            visits: std::cell::Cell::new(0),
+        }
     }
+}
+impl ClipboardFootprint {
     fn contains(&self, (sheet, row, column): (u32, i32, i32)) -> bool {
         if self.points.contains(&(sheet, row, column)) {
             return true;
@@ -215,7 +229,7 @@ impl<'a> UserModel<'a> {
         }
         let mut positions = HashSet::new();
         let mut owners = HashSet::new();
-        let mut footprint = ClipboardFootprint::new(&areas[..2]);
+        let mut footprint = ClipboardFootprintBuilder::new(&areas[..2]);
         while let Some(area) = areas.pop() {
             footprint.include(&area);
             let ws = self.model.workbook.worksheet(area.sheet)?;
@@ -249,7 +263,7 @@ impl<'a> UserModel<'a> {
                 }
             }
         }
-        footprint.finish();
+        let footprint = footprint.finish();
         let mut staged = UserModel::from_model(self.model.clipboard_stage(&positions));
         staged.view = self.view.clone();
         staged.pause_evaluation = true;
@@ -444,7 +458,7 @@ mod footprint_tests {
     use super::*;
     #[test]
     fn spatial_lookup_deduplicates_groups_and_bounds_query_work() {
-        let mut f = ClipboardFootprint::default();
+        let mut f = ClipboardFootprintBuilder::default();
         for r in 0..100 {
             for c in 0..100 {
                 let a = Area {
@@ -459,7 +473,7 @@ mod footprint_tests {
             }
         }
         assert_eq!(f.rectangles[&0].len(), 10000);
-        f.finish();
+        let f = f.finish();
         for (r, c) in [(1, 1), (201, 201), (397, 397), (400, 400)] {
             let before = f.visits.get();
             assert_eq!(f.contains((0, r, c)), r % 4 == 1 && c % 4 == 1);
@@ -478,7 +492,7 @@ mod footprint_tests {
             width: 20,
             height: i32::MAX,
         };
-        let mut f = ClipboardFootprint::new(&[a]);
+        let mut f = ClipboardFootprintBuilder::new(&[a]);
         for r in 1..1000 {
             f.include(&Area {
                 sheet: 0,
@@ -488,11 +502,6 @@ mod footprint_tests {
                 height: 2,
             });
         }
-        f.finish();
-        assert!(f.indexes.is_empty());
-        assert!(f.contains((0, i32::MAX, 20)));
-        assert!(!f.contains((0, i32::MAX, 21)));
-        assert_eq!(f.visits.get(), 0);
         f.include(&Area {
             sheet: 1,
             row: i32::MAX - 1,
@@ -500,7 +509,11 @@ mod footprint_tests {
             width: i32::MAX,
             height: i32::MAX,
         });
-        f.finish();
+        let f = f.finish();
+        assert!(!f.indexes.contains_key(&0));
+        assert!(f.contains((0, i32::MAX, 20)));
+        assert!(!f.contains((0, i32::MAX, 21)));
+        assert_eq!(f.visits.get(), 0);
         assert!(f.contains((1, i32::MAX, i32::MAX)));
     }
 }
